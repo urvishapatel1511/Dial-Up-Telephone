@@ -1,0 +1,439 @@
+:root {
+  --bg: #0b0a12;
+  --panel: #15131f;
+  --line: #2b2740;
+  --text: #ece8ff;
+  --muted: #a49fbf;
+  --ghost: #7cf7c6;
+  --violet: #b99cff;
+  --danger: #ff6b8b;
+  --gold: #ffd36b;
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: var(--text);
+  background: radial-gradient(ellipse at top, #1d1630 0%, var(--bg) 60%) fixed;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+main {
+  max-width: 30rem;
+  margin: 0 auto;
+  padding: 1rem 1rem 3rem;
+}
+h1,
+h2 {
+  margin: 0.2rem 0;
+}
+h1 {
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+  letter-spacing: 0.08em;
+  color: var(--ghost);
+  text-shadow: 0 0 12px rgba(124, 247, 198, 0.6);
+  font-size: 1.7rem;
+}
+h2 {
+  font-size: 1.25rem;
+}
+.tag,
+.small,
+.label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.label {
+  display: block;
+  margin-bottom: 0.3rem;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1rem;
+  margin: 0.8rem 0;
+}
+.step {
+  color: var(--violet);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin: 0;
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: end;
+  margin: 0.5rem 0;
+}
+
+/* ---------- buttons ---------- */
+button {
+  font: inherit;
+  color: var(--text);
+  background: #221f33;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.6rem 1rem;
+  min-height: 44px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  border-color: var(--violet);
+}
+button:focus-visible {
+  outline: 3px solid var(--gold);
+  outline-offset: 2px;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.primary {
+  width: 100%;
+  margin-top: 0.8rem;
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: #06140f;
+  background: var(--ghost);
+  border: 0;
+  box-shadow: 0 0 18px rgba(124, 247, 198, 0.35);
+}
+.ghostly {
+  background: transparent;
+}
+
+/* ---------- top HUD ---------- */
+.scope {
+  width: 100%;
+  height: 56px;
+  display: block;
+  border-radius: 10px;
+  background: #0f0d18;
+  border: 1px solid var(--line);
+}
+.hud {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0.4rem 0;
+  min-height: 1.6rem;
+}
+.candles .candle {
+  font-size: 1.3rem;
+  margin-right: 0.15rem;
+  transition: filter 0.4s, opacity 0.4s;
+}
+.candles .out {
+  filter: grayscale(1) brightness(0.4);
+  opacity: 0.5;
+}
+.mic-state {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.mic-state.on {
+  color: var(--danger);
+  font-weight: 700;
+}
+.status {
+  margin: 0.4rem 0;
+  padding: 0.8rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #120f1c;
+  font-weight: 600;
+  min-height: 3rem;
+}
+.status.ok {
+  border-color: var(--ghost);
+  color: var(--ghost);
+}
+.status.error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.hint {
+  color: var(--gold);
+  font-size: 0.9rem;
+}
+.chirp-info {
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+  min-height: 1em;
+}
+
+/* ---------- role choice ---------- */
+.roles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+  margin: 0.8rem 0;
+}
+.role {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 1rem 0.5rem;
+}
+.role-icon {
+  font-size: 2.2rem;
+}
+.role small {
+  color: var(--muted);
+}
+
+/* ---------- grids ---------- */
+.grid {
+  display: grid;
+  gap: 3px;
+  aspect-ratio: 1;
+  touch-action: none;
+  user-select: none;
+}
+.editor.grid {
+  width: min(100%, 19rem);
+  margin: 0 auto;
+}
+.rune-editor.grid {
+  width: min(70%, 13rem);
+  margin: 0 auto 0.5rem;
+}
+.rune-view.grid {
+  width: 6rem;
+}
+.cell {
+  background: #24203a;
+  border: 0;
+  border-radius: 3px;
+  padding: 0;
+  min-height: 0;
+}
+.cell.on {
+  background: var(--ghost);
+  box-shadow: 0 0 8px rgba(124, 247, 198, 0.7);
+}
+.rune-view .cell.on {
+  background: var(--gold);
+  box-shadow: 0 0 8px rgba(255, 211, 107, 0.7);
+}
+.rune-editor .cell.on {
+  background: var(--gold);
+  box-shadow: 0 0 8px rgba(255, 211, 107, 0.7);
+}
+.name input {
+  display: block;
+  font: inherit;
+  font-size: 1.2rem;
+  width: 12ch;
+  padding: 0.45rem;
+  color: var(--text);
+  background: #0f0d18;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+/* ---------- ghost sprite ---------- */
+.ghost {
+  width: 7rem;
+  aspect-ratio: 1;
+  margin: 0.6rem auto;
+  transition: opacity 0.8s, filter 0.8s;
+}
+.ghost[data-energy='2'] {
+  opacity: 0.8;
+}
+.ghost[data-energy='1'] {
+  opacity: 0.55;
+  filter: blur(0.5px);
+}
+.ghost[data-energy='0'] {
+  opacity: 0.15;
+  filter: blur(2px) grayscale(1);
+}
+.ghost-body {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  width: 100%;
+  height: 100%;
+  animation: float 3.2s ease-in-out infinite;
+}
+.px.on {
+  background: #f4f1ff;
+  box-shadow: 0 0 10px rgba(124, 247, 198, 0.9);
+  border-radius: 2px;
+}
+.materialize .px.on {
+  opacity: 0;
+  animation: appear 0.35s forwards;
+  animation-delay: calc(var(--i) * 35ms);
+}
+.ghost.sending .ghost-body {
+  animation: drift 1.2s ease-in-out infinite;
+}
+.ghost-row {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+.ghost-row .ghost {
+  width: 5.5rem;
+  margin: 0;
+}
+@keyframes float {
+  50% {
+    transform: translateY(-6px);
+  }
+}
+@keyframes drift {
+  50% {
+    transform: translateX(10px) scale(0.92);
+    filter: drop-shadow(0 0 12px var(--ghost));
+  }
+}
+@keyframes appear {
+  from {
+    opacity: 0;
+    transform: scale(2);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ---------- choices ---------- */
+.choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  gap: 0.5rem;
+  margin: 0.6rem 0;
+}
+.choices button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.7rem 0.4rem;
+}
+.choices .big {
+  font-size: 2rem;
+  line-height: 1.1;
+}
+.choices button[aria-checked='true'] {
+  border: 2px solid var(--ghost);
+  box-shadow: 0 0 14px rgba(124, 247, 198, 0.4);
+}
+.keyhole {
+  text-align: center;
+  margin: 0.6rem 0;
+}
+.keyhole .glyph {
+  display: block;
+  font-size: 5rem;
+  line-height: 1;
+  color: var(--gold);
+  text-shadow: 0 0 20px rgba(255, 211, 107, 0.6);
+}
+.away {
+  color: var(--violet);
+  font-style: italic;
+}
+
+/* ---------- scene (Other Side) ---------- */
+.scene-row {
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+}
+.scene-icon {
+  font-size: 3rem;
+  line-height: 1;
+}
+.scene.cleared {
+  border-color: var(--ghost);
+}
+.exit {
+  margin-top: 0.6rem;
+}
+
+/* ---------- end ---------- */
+.end {
+  text-align: center;
+}
+.end .ghost {
+  width: 9rem;
+}
+.end.win {
+  border-color: var(--ghost);
+  box-shadow: 0 0 30px rgba(124, 247, 198, 0.25);
+}
+.end.lose {
+  border-color: var(--danger);
+}
+
+/* ---------- sound + diagnostics ---------- */
+.sound {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin: 0.8rem 0;
+}
+.diag {
+  margin-top: 1.5rem;
+  color: var(--muted);
+}
+dl {
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.75rem;
+  word-break: break-all;
+}
+dt {
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .materialize .px.on {
+    opacity: 1;
+  }
+}
+
+/* ---------- offline bar ---------- */
+.offline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.4rem 0 0.8rem;
+  font-size: 0.85rem;
+}
+.offline button {
+  min-height: 36px;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.85rem;
+}
+.offline.ready #prepare {
+  display: none;
+}
+.offline.ready #offline-state {
+  color: var(--ghost);
+  font-weight: 600;
+}
+.offline.failed #offline-state {
+  color: var(--gold);
+}
