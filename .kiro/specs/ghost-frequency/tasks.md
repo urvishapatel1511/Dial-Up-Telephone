@@ -1,45 +1,57 @@
-# Ghost Frequency: Tasks
+# Ghost Frequency: Tasks (v4 "The Rescue")
 
-Deadline **Dec 4, 2026, 2:00 PM PT**. `[x]` done · `[ ]` open · **AUTO** = `npm.cmd test` · **HW** = you check on real devices.
+Deadline **Dec 4, 2026, 2:00 PM PT**. `[x]` done · `[ ]` open · **AUTO** = `npm.cmd run check` · **BROWSER** = `npm.cmd run screens` (headless Edge, no sound) · **HW** = the developer checks on real devices.
 
-## Phase 1: prove it on real devices (now)
+## Done earlier (v1–v3)
+- [x] Prototype sound link, ggwave vendored, HTTPS dev server
+- [x] 3-step game with candles, haunted theme, spectrum, effects
+- [x] Offline mode (verified precache) and GitHub Actions Pages workflow
+- [x] Repo pushed and Pages enabled by the developer. The live site still serves **v3** until v4 is pushed
 
-- [ ] **0. FIRST REAL-DEVICE TEST (HW, do this first)**. See `docs/hardware-test.md`, log in `docs/hardware-log.md`
-  - [ ] HW: laptop → phone: the ghost appears with the identical drawing and name
-  - [ ] HW: phone → laptop: the key comes home
-  - [ ] HW: a full game with one mistake, then a win on both screens
-  - [ ] HW: Resend causes no duplicate event and no extra lost candle
-  - [ ] HW: spectrum moves while sending and listening. Effects play
-  - [ ] HW: chirp seconds and attempts logged, quiet and with talking
-  - [ ] HW: mic-denied message appears
-  - [ ] HW: two windows on one laptop can play together
+## Phase 1: reliability and onboarding
+- [x] 1.1 Role per tab (`sessionStorage`). Role picker, role badge, and Change role in the top bar. BROWSER: a fresh window shows the picker
+- [x] 1.2 Setup guide on the intro screen
+- [x] 1.3 Protocol v4, ≤ 26 bytes. AUTO: round-trip property, max-size test, every rejection case, v1–v3 magic rejected
+- [x] 1.4 Summon → Accept pairing, partner tag, retired ghost IDs. AUTO: pairing, unrelated ghost, wrong tag, stale chirps
+- [x] 1.5 `SendGate`: commit after playback, identical retry, one send at a time. AUTO: failed playback and busy gate
+- [x] 1.6 Audio states with 10 s timeouts, Try again, Resume listening after a hide or reload
+- [x] 1.7 "Chirp played… waiting for the other device", never "arrived"
+- [x] 1.8 Play again / Swap roles clear lastSent, choices, and rewards; keep dedupe. AUTO
+- [x] 1.9 `[hidden] { display: none !important }`. BROWSER: hidden controls are not visible
 
-- [x] 1. Prototype and sound link (ggwave vendored, HTTPS dev server, Listen/Resend, status messages)
-- [x] 2. Message format v3: stage, item, energy, ok, CRC
-- [x] 3. Game: obstacle/object, keyhole/key, 4×4 rune, 3 candles, fade, win, stats
-- [x] 4. Haunted theme, glowing ghost sprite, materialize and fade, live spectrum, synthesized effects, reduced motion
-- [x] 5. Per-tab role and per-role storage for same-device play
-- [x] 6. AUTO: 50 tests pass, including a perfect run, a run where three mistakes fade the ghost, duplicates, own echo, refresh, every invalid-message case, rune transport, and ggwave encode→decode. Not yet run in a real browser
+## Phase 2: personality
+- [x] 2.1 `personalityOf(ghostId)`. AUTO: deterministic, all four occur
+- [x] 2.2 Reactions for arrive, solved, wrong, last candle, rescued, farewell, faded, hat. AUTO: use the name, ≤ 80 chars
+- [x] 2.3 Motion per personality (CSS, off under reduced motion) and a text tag
 
-## Phase 2: offline and deploy
+## Phase 3: puzzles
+- [x] 3.1 Obstacle stage kept, with clearer copy and hints
+- [x] 3.2 Lock deduction. AUTO: exactly one solution for 2000 random IDs; neither half alone suffices; the House's text never names a key
+- [x] 3.3 Lying mirror. AUTO: mirror involution, asymmetry ≥ 4, pairwise distances, tolerance, reflection-painted fails
 
-- [x] 7. Offline: the build writes `precache.json` + `sw.js` from the real `dist/` contents (and fails if the page, the JS/CSS, or ggwave.js is missing). Cache-first service worker with offline fallback for page loads. "📦 Prepare for offline play" saves every file, then verifies each one's presence and size before saying ready (R6.1)
-  - AUTO: 62 tests pass, including manifest, verification, no third-party URLs, and a check that the real `dist/` matches `precache.json` and `sw.js`
-  - Not yet run in a browser. The service worker only runs on the published site
-- [x] 8a. GitHub Actions workflow: on push, build, test, and publish to Pages (`.github/workflows/pages.yml`)
-- [ ] 8b. **YOU**: create the GitHub repo and push (`docs/publish.md`, steps 1–7)
-- [ ] 8c. HW: on the published URL, both devices Prepare → radios off → reload → finish a game
+## Phase 4: room reactions
+- [x] 4.1 Darkness veil lifts, vampire retreats, clock compartment opens, seal cracks (CSS transitions). BROWSER screenshots
 
-## Phase 3: polish
+## Phase 5: Rescue the Hat
+- [x] 5.1 Offer, skip farewell, two-spot clues, one attempt, verdict chirp. AUTO: skipped, won, failed; no candle; rescue kept
 
-- [ ] 9. Tune timings from the hardware log (R7.3)
-- [ ] 10. More rooms or variety if testing shows players want it (more obstacles, more runes)
-- [ ] 11. Accessibility pass with keyboard and a screen reader
+## Phase 6: ending and replay
+- [x] 6.1 Portrait (hat overlay), farewell, candles, puzzles, time, stats in details
+- [x] 6.2 Play again / Swap roles, with the "other player must choose too" note
 
-## Phase 4: submit
+## Phase 7: layout and accessibility
+- [x] 7.1 Two-column layout ≥ 900 px, sticky status bar, single column on phones. BROWSER: 1366×820 and 390×844
+- [x] 7.2 Roving-tabindex grids, arrows/Home/End, Space/Enter, aria-pressed. BROWSER: keyboard test
+- [x] 7.3 Effects toggle in Settings, with an explanation that chirps always play. Sends wait for effects to finish
 
-- [ ] 12. HW: full run on the demo devices, quiet and noisy
-- [ ] 13. Demo video < 3 min: a fresh drawing, one mistake, the win on both screens
-- [ ] 14. Kiro write-up (`docs/kiro-log.md`): specs, steering, hooks, and property-based tests that caught bugs
-- [ ] 15. Blog post + social post #KiroweenHackathon26
-- [ ] 16. Checklist: public repo, MIT license, `.kiro/` committed, app URL, video, Resurrection category
+## Validation
+- [x] V1 AUTO: typecheck, build, all tests pass (see `docs/kiro-log.md` for the latest counts)
+- [x] V2 BROWSER: 17 checks plus screenshots in `docs/screenshots/`
+- [ ] V3 **HW**: full game on laptop + phone (`docs/hardware-test.md`)
+- [ ] V4 **HW**: first-time playtest timing (target 5–8 min)
+- [ ] V5 **HW**: offline reload on both devices from the published site (after pushing v4)
+- [ ] V6 **HW**: iPhone Safari and Android Chrome rendering (emoji fonts, mic prompt)
+
+## Submission (later)
+- [ ] Push v4 (developer), confirm the Pages deploy
+- [ ] Demo video < 3 min, Kiro write-up from `docs/kiro-log.md`, blog/social posts, submission checklist

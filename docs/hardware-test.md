@@ -1,72 +1,69 @@
-# Real-device test (task 0)
+# Real-device test: one full rescue
 
-Goal: laptop → phone → laptop by sound only, with Wi-Fi and Bluetooth off after the page loads.
+Goal: a complete adventure where **every** message between the laptop and the phone travels as sound. Nobody has run this test yet. Record what you see in `docs/hardware-log.md`.
 
-> The prototype does not cache itself for offline use yet (that's task 4). For this test, load the page on both devices while they're on Wi-Fi, then turn radios off **without reloading**.
+The automated tests (`npm.cmd run check`) include a *synthetic* ggwave test: samples go straight from the encoder to the decoder, with no speaker and no microphone. Only this checklist tests the real air path.
 
-## A. Start the HTTPS dev server on the laptop
+## A. Open the game on both devices
 
-1. Put the laptop and the phone on the same Wi-Fi network.
-2. In the project folder, run:
-   ```powershell
-   npm.cmd install
-   npm.cmd run dev:https
-   ```
-   (`npm.cmd` avoids the PowerShell "running scripts is disabled" error.)
-3. Vite prints a `Network:` URL such as `https://192.168.1.23:5173/`. If Windows Firewall asks, allow Node.js on **private** networks.
+Use either option.
 
-## B. Open the page on both devices
+**Option 1: published site (recommended, also tests offline)**
+1. Open `https://urvishapatel1511.github.io/Ghost_frequency/` on the laptop and the phone, both online. GitHub Pages must be enabled; see `docs/publish.md`.
+2. On both, tap **📦 Prepare for offline play** and wait for "✓ Ready for offline play". If it says "reload this page once", do that and tap Prepare again.
+3. Turn off **Wi-Fi and Bluetooth** on both devices, then **reload** both pages. The game must still load.
 
-- **Laptop**: open `https://localhost:5173/`, choose Advanced → Proceed (self-signed certificate).
-- **Phone**: type the `Network:` URL.
-  - Android Chrome: "Your connection is not private" → Advanced → Proceed.
-  - iPhone Safari: "This connection is not private" → Show Details → visit this website → Visit Website.
-- Open **Diagnostics** on both devices. Check `secure context: true` and `audio engine: ggwave loaded`.
+**Option 2: test server on the laptop (no offline mode)**
+1. Laptop and phone on the same Wi-Fi. In the Kiro terminal, run `npm.cmd run dev:https` and note the `Network:` address.
+2. Laptop: `https://localhost:5173/`. Phone: the `Network:` address. Accept the certificate warning (Advanced → Proceed, or Show Details → visit this website).
+3. After both pages have loaded, you may turn off Wi-Fi and Bluetooth. Don't reload.
 
-## C. Prepare the devices
+## B. Prepare
 
-- Phone: ringer/silent switch **off** (iOS mutes Web Audio in silent mode). Media volume high. Close other apps that use the mic.
-- Laptop: volume 70–100 %. Turn off any "audio enhancements" or noise cancellation.
-- Distance: 30–50 cm, phone mic pointed at the laptop speaker.
-- Now turn **Wi-Fi and Bluetooth off on both devices**. Don't reload.
+- Volume high on both. iPhone: silent mode off. Close other apps that use the microphone.
+- Devices 30–50 cm apart, speakers facing each other.
+- Laptop: **The House**. Phone: **The Other Side**. Each window asks for its role. A new window never inherits one.
+- On both, tap **🎙 Start listening** and allow the microphone. The status bar should say "● Listening".
 
-## D. Play one full game
+## C. Play (make at least one mistake on purpose)
 
-Laptop → **The House**. Phone → **The Other Side**. On both, press **🎙 Listen** once and allow the microphone. After that, each device listens again automatically after it sends.
+| # | Device | Do | Expect |
+|---|---|---|---|
+| 1 | Phone | Read the room out loud (darkness, vampire, or clock) | – |
+| 2 | Laptop | Draw a ghost, type a name, press **Summon** | Status: "Chirp played…". It must **not** say the ghost arrived |
+| 3 | Phone | – | "<name> is calling". The ghost appears pixel by pixel, identical to the laptop drawing |
+| 4 | Laptop | Press **Resend last chirp** | Phone: "Heard the same chirp again. Nothing changed." |
+| 5 | Phone | Press **Accept** | Laptop: "<name> reached the Other Side and was welcomed in!" |
+| 6 | Laptop | Pick a **wrong** object, send | Phone: "doesn't help", 2 candles. The phone sends the ghost home. Laptop: "came home empty-handed" |
+| 7 | Laptop | Pick the right object, send | Phone: the room reacts (darkness lifts / vampire flees / clock opens), and four keys appear |
+| 8 | Both | Laptop describes notches and engraving. Phone compares teeth and metal | Exactly one key fits both clues |
+| 9 | Phone | Send the key | Laptop: "The … key fits! The lock clicks open." |
+| 10 | Both | Phone describes the mirror image, row by row. Laptop paints the true rune (flip left/right) | – |
+| 11 | Laptop | Send the rune | Phone: the seal breaks. The phone sends the ghost home free. Laptop: bonus offer |
+| 12 | Both | Compare hat clues. Laptop picks a spot (or Skip) | Phone shows the result and sends it. Both show the ending, with the hat if found |
+| 13 | Both | Press **Play again** on both | New room, new drawing screen. An old chirp replayed is ignored |
 
-**Step 1: the obstacle (the laptop decides)**
-1. Phone: read your haunted room out loud (darkness, a vampire, or a silent clock).
-2. Laptop: draw a ghost, type a name, and pick an object. To test a mistake, pick a **wrong** one first. Press **Release**.
-3. Phone: the ghost appears pixel by pixel, with the identical drawing and name. The wrong object costs a candle (2 left). Press **Send … home for something else**.
-4. Laptop: "came home weaker". Pick the right object and release again. Phone: "it worked!" and four keys appear.
-5. Laptop: press **Resend last chirp**. Phone: "Heard the same chirp again. Nothing changed," and no candle is lost.
+## D. Extra checks
 
-**Step 2: the keyhole (the phone decides)**
+- **Refresh** the laptop mid-game and the phone mid-game. Each resumes the same stage and shows **Resume listening**.
+- **Switch tabs** while listening and come back. The mic indicator turns off, and **Resume listening** is highlighted.
+- **Block the microphone** in site settings and press Start listening. The blocked-mic instructions appear, with **Try again**.
+- **Sound effects off** (⚙ Settings). Chirps still play.
+- **Second nearby game:** if you have a third device, summon another ghost while paired. The paired phone says "another game nearby. Ignored."
+- **One device:** two browser windows on the laptop, one per role. Play through.
 
-6. Laptop: describe the keyhole out loud without showing the screen.
-7. Phone: pick a key and send it home. Laptop: "The key fits! The door creaks open…"
+## E. Measurements to log
 
-**Step 3: the rune (the laptop paints)**
-
-8. Phone: describe the rune on your exit door, block by block (4 × 4).
-9. Laptop: paint it and press **Send … wearing the rune**.
-10. Phone: "it matches!" → press **Send … home, free!**
-11. Both: the win screen. The laptop shows the time, candles left, chirps, bytes, and seconds of sound.
-
-**Extra checks**
-
-12. Refresh the laptop mid-game. It should continue where it was.
-13. Block the mic in site settings and press Listen. The blocked-mic instructions should appear.
-14. One device only: open two browser windows side by side on the laptop, one House and one Other Side, and play.
-
-Then repeat step 1 five times in a quiet room and five times with people talking. Log every attempt in `docs/hardware-log.md`.
+- Chirp seconds (shown after each send, also in Settings → Diagnostics).
+- Chirps needed per message in a quiet room, and again with people talking (5 tries each).
+- **First-time players:** total time from Summon to the ending (target 5–8 minutes), and where they got stuck.
 
 ## If it fails
 
 | Symptom | Try |
 |---|---|
-| Phone shows nothing | Volume up, move closer, press Resend. Check the phone's ringer switch |
-| "wasn't a ghost" | Partial decode. Resend. Note it in the log |
-| Laptop doesn't hear the phone | Phone speakers are weak: point the phone's bottom speaker at the laptop mic, 20 cm |
-| Mic never asks for permission | The page isn't secure. Use the `https://` URL |
-| Works on Wi-Fi, not offline | Shouldn't happen (no network is used). Log it |
+| Nothing is heard | Volume up, move closer, press Resend. Check the phone's silent switch |
+| "garbled chirp" | Resend. Note it in the log |
+| Laptop doesn't hear the phone | Point the phone's bottom speaker at the laptop mic, 20 cm |
+| "Audio didn't start" | Tap Try again. If it repeats, reload |
+| Mic never asks | The page is not https:// |

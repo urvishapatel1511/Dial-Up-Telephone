@@ -2,36 +2,56 @@ import { crc8 } from './crc8';
 import { packGrid, unpackGrid, type Grid } from './drawing';
 
 /**
- * Wire format v3 (see .kiro/specs/ghost-frequency/design.md):
- *  0     magic/version 0xA3
- *  1     flags: bit0 direction, bits1-2 stage (1..3), bits3-5 item (0..7), bits6-7 energy (0..3)
- *  2     status: bit0 ok, bits1-7 zero
+ * Wire format v4 (see .kiro/specs/ghost-frequency/design.md), at most 26 bytes:
+ *  0     magic/version 0xA4
+ *  1     bit0 direction · bits1-3 stage (1..6) · bits4-7 item (0..11)
+ *  2     bits0-1 energy · bit2 ok · bit3 hat · bits4-7 zero
  *  3-4   ghost ID (uint16 BE)
- *  5     transfer ID (uint8)
+ *  5     transfer ID
  *  6-13  drawing (8 bytes)
- *  14    name length N (1..10)
+ *  14    bits0-3 name length (1..10) · bits4-7 partner tag (0..15)
  *  15..  name (printable ASCII)
  *  last  CRC-8 over all previous bytes
  */
-export const MAGIC = 0xa3;
+export const MAGIC = 0xa4;
 export const NAME_MAX = 10;
 export const HEADER_LEN = 15;
 export const MAX_MESSAGE_LEN = HEADER_LEN + NAME_MAX + 1; // 26
 
-export const ITEMS = ['none', 'lantern', 'bell', 'mirror', 'star', 'moon', 'skull', 'heart'] as const;
+export const ITEMS = [
+  'none',
+  'lantern',
+  'bell',
+  'mirror',
+  'star',
+  'moon',
+  'skull',
+  'heart',
+  'pumpkin',
+  'books',
+  'chair',
+  'coffin',
+] as const;
 export type Item = (typeof ITEMS)[number];
 
+/** 1 summon/accept · 2 obstacle · 3 key retry · 4 mirror rune · 5 hat · 6 farewell */
+export const STAGE = { summon: 1, obstacle: 2, keyRetry: 3, rune: 4, hat: 5, farewell: 6 } as const;
+export type Stage = 1 | 2 | 3 | 4 | 5 | 6;
+
 export type Direction = 'release' | 'return';
-export type Stage = 1 | 2 | 3;
 
 export interface GhostMessage {
   direction: Direction;
   stage: Stage;
   item: Item;
-  /** Spirit energy, 0..3. 0 means the ghost has faded. */
+  /** Spirit energy 0..3. */
   energy: number;
-  /** Verdict of the check the sender just made (used on stage 3 returns). */
+  /** Verdict of the check the sender made (rune match, rescue). */
   ok: boolean;
+  /** Bonus: the hat was rescued. */
+  hat: boolean;
+  /** 0 = not paired yet, 1..15 = pairing chosen by the Other Side on accept. */
+  partner: number;
   ghostId: number;
   transferId: number;
   grid: Grid;
@@ -44,6 +64,7 @@ export type DecodeError =
   | 'bad-magic'
   | 'bad-flags'
   | 'bad-stage'
+  | 'bad-item'
   | 'bad-length'
   | 'bad-name'
   | 'bad-checksum';
@@ -59,27 +80,28 @@ export function normalizeName(raw: string): string | null {
   return name;
 }
 
+const inRange = (v: number, lo: number, hi: number) => Number.isInteger(v) && v >= lo && v <= hi;
+
 export function encodeMessage(msg: GhostMessage): Uint8Array {
   const name = normalizeName(msg.name);
   if (name === null) throw new Error('name must be 1-10 printable ASCII characters');
-  if (!Number.isInteger(msg.ghostId) || msg.ghostId < 0 || msg.ghostId > 0xffff) throw new Error('ghostId must be uint16');
-  if (!Number.isInteger(msg.transferId) || msg.transferId < 0 || msg.transferId > 0xff) {
-    throw new Error('transferId must be uint8');
-  }
-  if (msg.stage !== 1 && msg.stage !== 2 && msg.stage !== 3) throw new Error('stage must be 1..3');
-  if (!Number.isInteger(msg.energy) || msg.energy < 0 || msg.energy > 3) throw new Error('energy must be 0..3');
+  if (!inRange(msg.ghostId, 0, 0xffff)) throw new Error('ghostId must be uint16');
+  if (!inRange(msg.transferId, 0, 0xff)) throw new Error('transferId must be uint8');
+  if (!inRange(msg.stage, 1, 6)) throw new Error('stage must be 1..6');
+  if (!inRange(msg.energy, 0, 3)) throw new Error('energy must be 0..3');
+  if (!inRange(msg.partner, 0, 15)) throw new Error('partner must be 0..15');
   const itemIndex = ITEMS.indexOf(msg.item);
   if (itemIndex < 0) throw new Error('unknown item');
 
   const out = new Uint8Array(HEADER_LEN + name.length + 1);
   out[0] = MAGIC;
-  out[1] = (msg.direction === 'return' ? 1 : 0) | (msg.stage << 1) | (itemIndex << 3) | (msg.energy << 6);
-  out[2] = msg.ok ? 1 : 0;
+  out[1] = (msg.direction === 'return' ? 1 : 0) | (msg.stage << 1) | (itemIndex << 4);
+  out[2] = msg.energy | (msg.ok ? 4 : 0) | (msg.hat ? 8 : 0);
   out[3] = msg.ghostId >> 8;
   out[4] = msg.ghostId & 0xff;
   out[5] = msg.transferId;
   out.set(packGrid(msg.grid), 6);
-  out[14] = name.length;
+  out[14] = name.length | (msg.partner << 4);
   for (let i = 0; i < name.length; i++) out[HEADER_LEN + i] = name.charCodeAt(i);
   out[out.length - 1] = crc8(out.subarray(0, out.length - 1));
   return out;
@@ -92,14 +114,15 @@ export function decodeMessage(bytes: Uint8Array): DecodeResult {
   if (bytes.length > MAX_MESSAGE_LEN) return fail('too-long');
   if (bytes[0] !== MAGIC) return fail('bad-magic');
 
-  const n = bytes[14];
+  const n = bytes[14] & 0x0f;
   if (n < 1 || n > NAME_MAX || bytes.length !== HEADER_LEN + n + 1) return fail('bad-length');
   if (crc8(bytes.subarray(0, bytes.length - 1)) !== bytes[bytes.length - 1]) return fail('bad-checksum');
 
-  const flags = bytes[1];
-  const stage = (flags >> 1) & 0x03;
-  if (stage === 0) return fail('bad-stage');
-  if (bytes[2] & 0xfe) return fail('bad-flags');
+  const stage = (bytes[1] >> 1) & 0x07;
+  if (stage < 1 || stage > 6) return fail('bad-stage');
+  const itemIndex = bytes[1] >> 4;
+  if (itemIndex >= ITEMS.length) return fail('bad-item');
+  if (bytes[2] & 0xf0) return fail('bad-flags');
 
   let name = '';
   for (let i = 0; i < n; i++) name += String.fromCharCode(bytes[HEADER_LEN + i]);
@@ -108,11 +131,13 @@ export function decodeMessage(bytes: Uint8Array): DecodeResult {
   return {
     ok: true,
     message: {
-      direction: flags & 1 ? 'return' : 'release',
+      direction: bytes[1] & 1 ? 'return' : 'release',
       stage: stage as Stage,
-      item: ITEMS[(flags >> 3) & 0x07],
-      energy: (flags >> 6) & 0x03,
-      ok: (bytes[2] & 1) === 1,
+      item: ITEMS[itemIndex],
+      energy: bytes[2] & 0x03,
+      ok: (bytes[2] & 4) !== 0,
+      hat: (bytes[2] & 8) !== 0,
+      partner: bytes[14] >> 4,
       ghostId: (bytes[3] << 8) | bytes[4],
       transferId: bytes[5],
       grid: unpackGrid(bytes.slice(6, 14)),
@@ -125,7 +150,7 @@ export function transferKey(m: Pick<GhostMessage, 'ghostId' | 'transferId' | 'di
   return `${m.ghostId}:${m.transferId}:${m.direction === 'return' ? 1 : 0}`;
 }
 
-/** Plain-language breakdown of a message, for the "inside the chirp" card. */
+/** Plain-language breakdown of a message, for the "inside the chirp" details. */
 export function describeBytes(nameLength: number): string {
-  return `drawing 8 · name ${nameLength + 1} · ghost ID 2 · game state 3 · check 1 · total ${HEADER_LEN + nameLength + 1} bytes`;
+  return `drawing 8 · name ${nameLength + 1} (incl. pairing tag) · ghost ID 2 · game state 3 · check 1 · total ${HEADER_LEN + nameLength + 1} bytes`;
 }

@@ -22,7 +22,9 @@ function receiveOverWire(rx: Modem, samples: Float32Array): Uint8Array | null {
   return null;
 }
 
-describe('ggwave pipeline in Node (no air path)', () => {
+// SYNTHETIC ONLY: samples go straight from the encoder to the decoder. This is not a
+// speaker-to-microphone test. Real air-path results belong in docs/hardware-log.md.
+describe('ggwave pipeline in Node (synthetic waveform, no air path)', () => {
   let tx: Modem;
   let rx: Modem;
 
@@ -36,10 +38,12 @@ describe('ggwave pipeline in Node (no air path)', () => {
     grid[0][0] = grid[3][4] = grid[7][7] = true;
     const bytes = encodeMessage({
       direction: 'release',
-      stage: 3,
-      item: 'heart',
-      energy: 3, // flags byte = 0xfe: bytes >= 0x80 must not be UTF-8 re-encoded
+      stage: 5,
+      item: 'coffin', // flags byte = 0xba: bytes >= 0x80 must not be UTF-8 re-encoded
+      energy: 3,
       ok: true,
+      hat: true,
+      partner: 15,
       ghostId: 0xff80,
       transferId: 0xfe,
       grid,
@@ -59,6 +63,8 @@ describe('ggwave pipeline in Node (no air path)', () => {
       item: 'star',
       energy: 2,
       ok: false,
+      hat: false,
+      partner: 7,
       ghostId: 1,
       transferId: 2,
       grid: emptyGrid(),

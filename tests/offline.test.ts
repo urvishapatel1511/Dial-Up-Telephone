@@ -87,7 +87,8 @@ describe('no third-party runtime origins (R6.3)', () => {
     const walk = (d: string): string[] =>
       readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : [join(d, n)]));
     for (const f of [...walk('src'), 'scripts/sw-template.js']) {
-      const code = readFileSync(f, 'utf8');
+      // The SVG XML namespace is an identifier, never fetched.
+      const code = readFileSync(f, 'utf8').split("'http://www.w3.org/2000/svg'").join("'svg-ns'");
       expect(code, f).not.toMatch(/["'`]https?:\/\//);
     }
   });
