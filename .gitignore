@@ -2,3 +2,5 @@ node_modules/
 dist/
 public/vendor/
 *.log
+gitsetup.cmd
+gitpush.cmd
