@@ -1,69 +1,53 @@
-# Real-device test: one full rescue
+# Real-device test: one round of Dial-Up Telephone
 
-Goal: a complete adventure where **every** message between the laptop and the phone travels as sound. Nobody has run this test yet. Record what you see in `docs/hardware-log.md`.
+Nobody has run this test yet. Record what you see in `docs/hardware-log.md`. The automated ggwave test is *synthetic* (no speaker, no microphone), so only this checklist tests the real air path.
 
-The automated tests (`npm.cmd run check`) include a *synthetic* ggwave test: samples go straight from the encoder to the decoder, with no speaker and no microphone. Only this checklist tests the real air path.
+You need **3 or more devices** (laptop + 2 phones is fine). With only two devices, play a 2-player round.
 
-## A. Open the game on both devices
+## A. Open the game
 
-Use either option.
+**Published site (recommended, also tests offline):**
+1. Open `https://urvishapatel1511.github.io/Ghost_frequency/` on every device while online. The new version must be pushed first; see `docs/publish.md`.
+2. On every device, tap **📦 Prepare for offline play** and wait for "✓ Ready". If it asks you to reload once, do that and tap Prepare again.
+3. Turn off Wi-Fi and Bluetooth everywhere, then reload. The game must still load.
 
-**Option 1: published site (recommended, also tests offline)**
-1. Open `https://urvishapatel1511.github.io/Ghost_frequency/` on the laptop and the phone, both online. GitHub Pages must be enabled; see `docs/publish.md`.
-2. On both, tap **📦 Prepare for offline play** and wait for "✓ Ready for offline play". If it says "reload this page once", do that and tap Prepare again.
-3. Turn off **Wi-Fi and Bluetooth** on both devices, then **reload** both pages. The game must still load.
-
-**Option 2: test server on the laptop (no offline mode)**
-1. Laptop and phone on the same Wi-Fi. In the Kiro terminal, run `npm.cmd run dev:https` and note the `Network:` address.
-2. Laptop: `https://localhost:5173/`. Phone: the `Network:` address. Accept the certificate warning (Advanced → Proceed, or Show Details → visit this website).
-3. After both pages have loaded, you may turn off Wi-Fi and Bluetooth. Don't reload.
+**Laptop test server (no offline mode):** run `npm.cmd run dev:https`. On the laptop open `https://localhost:5173/`; on the phones open the `Network:` address and accept the certificate warning.
 
 ## B. Prepare
 
-- Volume high on both. iPhone: silent mode off. Close other apps that use the microphone.
-- Devices 30–50 cm apart, speakers facing each other.
-- Laptop: **The House**. Phone: **The Other Side**. Each window asks for its role. A new window never inherits one.
-- On both, tap **🎙 Start listening** and allow the microphone. The status bar should say "● Listening".
+- Volume high everywhere. iPhone: silent mode off. Devices within about 1 m, in a circle.
 
-## C. Play (make at least one mistake on purpose)
+## C. Play
 
-| # | Device | Do | Expect |
+| # | Who | Do | Expect |
 |---|---|---|---|
-| 1 | Phone | Read the room out loud (darkness, vampire, or clock) | – |
-| 2 | Laptop | Draw a ghost, type a name, press **Summon** | Status: "Chirp played…". It must **not** say the ghost arrived |
-| 3 | Phone | – | "<name> is calling". The ghost appears pixel by pixel, identical to the laptop drawing |
-| 4 | Laptop | Press **Resend last chirp** | Phone: "Heard the same chirp again. Nothing changed." |
-| 5 | Phone | Press **Accept** | Laptop: "<name> reached the Other Side and was welcomed in!" |
-| 6 | Laptop | Pick a **wrong** object, send | Phone: "doesn't help", 2 candles. The phone sends the ghost home. Laptop: "came home empty-handed" |
-| 7 | Laptop | Pick the right object, send | Phone: the room reacts (darkness lifts / vampire flees / clock opens), and four keys appear |
-| 8 | Both | Laptop describes notches and engraving. Phone compares teeth and metal | Exactly one key fits both clues |
-| 9 | Phone | Send the key | Laptop: "The … key fits! The lock clicks open." |
-| 10 | Both | Phone describes the mirror image, row by row. Laptop paints the true rune (flip left/right) | – |
-| 11 | Laptop | Send the rune | Phone: the seal breaks. The phone sends the ghost home free. Laptop: bonus offer |
-| 12 | Both | Compare hat clues. Laptop picks a spot (or Skip) | Phone shows the result and sends it. Both show the ending, with the hat if found |
-| 13 | Both | Press **Play again** on both | New room, new drawing screen. An old chirp replayed is ignored |
+| 1 | Players | Type a name → **Join a game** → seat 2, 3, … → **I'm ready**. Allow the mic | "● Listening for the next chirp" |
+| 2 | Host | Type a name → **Host a game** → set the player count → **Start** | Every player: "Connected! … You are seat N." The line appears |
+| 3 | Host | Draw the word, **Send my drawing** | Seat 2: "Your turn!", with the drawing. Others: "Heard Asha (seat 1). Now seat 2 is up." |
+| 4 | Seat 2 | Type a guess, send | Seat 3 sees only the guess. The line updates on every screen |
+| 5 | Everyone | Continue to the last seat | Host: "Gather around for the reveal!" |
+| 6 | Host | **Reveal the chain** | Every phone shows the chain card by card, and they all match |
+| 7 | Everyone | Players press **Ready for the next round**, then the host presses **Host the next round** → Start | A new round starts. An old chirp replayed is ignored |
 
 ## D. Extra checks
 
-- **Refresh** the laptop mid-game and the phone mid-game. Each resumes the same stage and shows **Resume listening**.
-- **Switch tabs** while listening and come back. The mic indicator turns off, and **Resume listening** is highlighted.
-- **Block the microphone** in site settings and press Start listening. The blocked-mic instructions appear, with **Try again**.
-- **Sound effects off** (⚙ Settings). Chirps still play.
-- **Second nearby game:** if you have a third device, summon another ghost while paired. The paired phone says "another game nearby. Ignored."
-- **One device:** two browser windows on the laptop, one per role. Play through.
+- **Missed chirp:** cover one phone's mic while the previous player sends. Its screen says who to ask. That player presses **Resend**, and the turn arrives once.
+- **Seat too high:** a player picks seat 6 in a 4-player game. They're told to pick a lower seat. After fixing it, the host's **Resend** lets them join.
+- **Refresh** a phone mid-round. It resumes and offers **Resume listening**.
+- **Secrecy:** while waiting, no phone shows the secret word or anyone else's entry.
+- **Effects off** (⚙ Settings): chirps still play.
 
-## E. Measurements to log
+## E. Measure
 
 - Chirp seconds (shown after each send, also in Settings → Diagnostics).
-- Chirps needed per message in a quiet room, and again with people talking (5 tries each).
-- **First-time players:** total time from Summon to the ending (target 5–8 minutes), and where they got stuck.
+- Chirps needed per turn, in a quiet room and with people talking.
+- Round length with first-time players, and whether people laughed at the reveal.
 
 ## If it fails
 
 | Symptom | Try |
 |---|---|
-| Nothing is heard | Volume up, move closer, press Resend. Check the phone's silent switch |
-| "garbled chirp" | Resend. Note it in the log |
-| Laptop doesn't hear the phone | Point the phone's bottom speaker at the laptop mic, 20 cm |
-| "Audio didn't start" | Tap Try again. If it repeats, reload |
-| Mic never asks | The page is not https:// |
+| Nothing heard | Volume up, move closer, ask the sender to Resend. iPhone silent switch |
+| "garbled chirp" | Resend |
+| "Audio didn't start" | Try again, or reload |
+| Mic never asks | The page must be https:// |

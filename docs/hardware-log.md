@@ -2,30 +2,26 @@
 
 No physical-device results have been recorded yet. Fill this in from `docs/hardware-test.md`. Only real speaker-to-microphone runs belong here.
 
-Devices: laptop = ____________ (browser ______), phone = ____________ (browser ______)
+Devices (model / browser): 1 ____________ 2 ____________ 3 ____________ 4 ____________
 
-## Transfers
+## Chirps
 
-| Date | Direction | Room | Distance | Chirp s | Chirps until decoded | Identical drawing? | Notes |
+| Date | From → to | Room | Distance | Chirp s | Chirps until heard | Correct on screen? | Notes |
 |---|---|---|---|---|---|---|---|
-| | laptop → phone | quiet | | | | | |
-| | phone → laptop | quiet | | | | | |
-| | laptop → phone | talking | | | | | |
-| | phone → laptop | talking | | | | | |
+| | | quiet | | | | | |
+| | | talking | | | | | |
 
-## Full games / playtests
+## Rounds / playtests
 
-| Date | Players (first time?) | Summon → ending (min) | Candles left | Hat? | Where they got stuck | Bugs |
+| Date | Players | First time? | Round length (min) | Reveal matched on all devices? | Fun? (1–5) | Problems |
 |---|---|---|---|---|---|---|
 | | | | | | | |
 
-## Checklist results (section D)
+## Checklist (section D)
 
 | Check | Result | Date |
 |---|---|---|
-| Refresh mid-game resumes (House) | | |
-| Refresh mid-game resumes (Other Side) | | |
-| Tab switch → Resume listening | | |
-| Mic blocked → instructions + Try again | | |
-| Offline reload on both devices | | |
-| Two windows on one laptop | | |
+| Missed chirp → Resend | | |
+| Seat too high → fix → Resend | | |
+| Refresh mid-round | | |
+| Offline reload on every device | | |

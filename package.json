@@ -1,8 +1,8 @@
 {
-  "name": "ghost-frequency",
+  "name": "dial-up-telephone",
   "version": "0.1.0",
   "private": true,
-  "description": "A cooperative puzzle where a hand-drawn ghost travels between two devices through audible sound.",
+  "description": "Dial-Up Telephone: the telephone drawing game, played over an acoustic modem. Every drawing and guess travels between phones as sound.",
   "license": "MIT",
   "type": "module",
   "scripts": {

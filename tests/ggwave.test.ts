@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { Modem } from '../src/audio/modem';
 import type { GgwaveFactory } from '../src/audio/ggwave-types';
 import { emptyGrid } from '../src/protocol/drawing';
-import { decodeMessage, encodeMessage } from '../src/protocol/message';
+import { decodePacket, encodePacket } from '../src/protocol/packet';
 
 const require = createRequire(import.meta.url);
 const factory = require('ggwave') as GgwaveFactory;
@@ -33,47 +33,21 @@ describe('ggwave pipeline in Node (synthetic waveform, no air path)', () => {
     rx = await Modem.create(factory, SAMPLE_RATE);
   });
 
-  it('binary ghost message survives encode -> waveform -> decode byte-for-byte', () => {
-    const grid = emptyGrid();
-    grid[0][0] = grid[3][4] = grid[7][7] = true;
-    const bytes = encodeMessage({
-      direction: 'release',
-      stage: 5,
-      item: 'coffin', // flags byte = 0xba: bytes >= 0x80 must not be UTF-8 re-encoded
-      energy: 3,
-      ok: true,
-      hat: true,
-      partner: 15,
-      ghostId: 0xff80,
-      transferId: 0xfe,
-      grid,
-      name: 'Casper~!',
-    });
-    const samples = tx.encode(bytes);
-    const decoded = receiveOverWire(rx, samples);
+  it('a drawing packet survives encode -> waveform -> decode byte-for-byte', () => {
+    const drawing = emptyGrid();
+    drawing[0][0] = drawing[3][4] = drawing[7][7] = true;
+    const bytes = encodePacket({ type: 'entry', gameId: 0xff80, step: 7, name: 'Asha', drawing }); // bytes >= 0x80
+    const decoded = receiveOverWire(rx, tx.encode(bytes));
     expect(decoded && Array.from(decoded)).toEqual(Array.from(bytes));
-    const res = decodeMessage(decoded!);
-    expect(res.ok && res.message.grid).toEqual(grid);
+    const res = decodePacket(decoded!);
+    expect(res.ok && res.packet.type === 'entry' && 'drawing' in res.packet && res.packet.drawing).toEqual(drawing);
   });
 
-  it('reports chirp duration for the largest (26-byte) message', () => {
-    const bytes = encodeMessage({
-      direction: 'return',
-      stage: 2,
-      item: 'star',
-      energy: 2,
-      ok: false,
-      hat: false,
-      partner: 7,
-      ghostId: 1,
-      transferId: 2,
-      grid: emptyGrid(),
-      name: 'ABCDEFGHIJ',
-    });
+  it('reports chirp duration for the largest (26-byte) packet', () => {
+    const bytes = encodePacket({ type: 'entry', gameId: 1, step: 8, name: 'ABCDEFG', text: 'ABCDEFGHIJKL' });
+    expect(bytes.length).toBe(26);
     const samples = tx.encode(bytes);
-    const ms = tx.durationMs(samples);
-    console.log(`26-byte AUDIBLE_FAST chirp: ${ms} ms (synthetic; measure on hardware too)`);
-    expect(ms).toBeGreaterThan(0);
+    console.log(`26-byte AUDIBLE_FAST chirp: ${tx.durationMs(samples)} ms (synthetic; measure on hardware too)`);
     expect(receiveOverWire(rx, samples)).not.toBeNull();
   });
 });
