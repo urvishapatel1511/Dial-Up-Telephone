@@ -7,7 +7,7 @@ You need **3 or more devices** (laptop + 2 phones is fine). With only two device
 ## A. Open the game
 
 **Published site (recommended, also tests offline):**
-1. Open `https://urvishapatel1511.github.io/Ghost_frequency/` on every device while online. The new version must be pushed first; see `docs/publish.md`.
+1. Open `https://urvishapatel1511.github.io/Dial-Up-Telephone/` on every device while online. The new version must be pushed first; see `docs/publish.md`.
 2. On every device, tap **📦 Prepare for offline play** and wait for "✓ Ready". If it asks you to reload once, do that and tap Prepare again.
 3. Turn off Wi-Fi and Bluetooth everywhere, then reload. The game must still load.
 

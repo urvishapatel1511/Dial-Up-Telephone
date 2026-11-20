@@ -1,13 +1,13 @@
 # Publishing (GitHub Pages)
 
-- Repository: https://github.com/urvishapatel1511/Ghost_frequency (public, MIT license)
-- App URL: https://urvishapatel1511.github.io/Ghost_frequency/
+- Repository: https://github.com/urvishapatel1511/Dial-Up-Telephone (public, MIT license). It was renamed from `Ghost_frequency`; GitHub redirects the old repository URL.
+- App URL: https://urvishapatel1511.github.io/Dial-Up-Telephone/
 
-The site is live. Every push to `main` runs `.github/workflows/pages.yml`, which installs, builds, runs every automated test, and publishes `dist/`. A failing test stops the publish.
+Every push to `main` runs `.github/workflows/pages.yml`, which installs, builds, runs every automated test, and publishes `dist/`. A failing test stops the publish.
 
 GitHub Pages provides real HTTPS that phones trust, so the microphone and offline mode work there. The local test server (`npm.cmd run dev:https`) uses a self-signed certificate, so offline mode does not work on it.
 
-## Publishing a new version (you do this; the assistant never pushes)
+## Publishing a new version (the assistant pushes only when asked)
 
 ```powershell
 npm.cmd run check        # typecheck, build, all automated tests
@@ -22,8 +22,8 @@ Then open the repository's **Actions** tab and wait for the green check (about 1
 
 ## Offline test on real devices
 
-1. With Wi-Fi on, open the app URL on **both** devices.
-2. On both, tap **📦 Prepare for offline play** and wait for "✓ Ready for offline play". If it says "reload this page once while online", do that and tap Prepare again. The first visit installs the offline helper, and it takes control after one reload.
-3. Turn off **Wi-Fi and Bluetooth** on both.
-4. **Reload** the page on both. The game must load.
+1. With Wi-Fi on, open the app URL on **every** device.
+2. On each, tap **📦 Prepare for offline play** and wait for "✓ Ready for offline play". If it says "reload this page once while online", do that and tap Prepare again.
+3. Turn off **Wi-Fi and Bluetooth** on all devices.
+4. **Reload** the page on each. The game must load.
 5. Play a full round (`docs/hardware-test.md`) and log it in `docs/hardware-log.md`.

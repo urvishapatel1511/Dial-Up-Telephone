@@ -2,7 +2,7 @@
 
 A browser party game for Kiroween 2026 (Resurrection category). It revives the **acoustic modem**: the classic "telephone" game, where every message hops between phones **only as audible chirps**. One player draws a secret word on a 16×16 grid. The next player sees only that drawing and guesses. The next draws the guess, and so on. Like a real old phone line, the connection adds **static** that garbles messages on the way. At the end, everyone watches how the message mutated, scores points, and votes for the funniest hop.
 
-The repository keeps its original name (`Ghost_frequency`). The ghost game (v1–v4) was replaced by this design on the developer's request.
+The repository was renamed from `Ghost_frequency` to `Dial-Up-Telephone` by the developer. The spec folder keeps its original name. The ghost game (v1–v4) was replaced by this design on the developer's request.
 
 Deadline: **Dec 4, 2026, 2:00 PM PT**.
 

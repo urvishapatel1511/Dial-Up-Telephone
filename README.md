@@ -2,9 +2,9 @@
 
 The classic **telephone** drawing game, played over a resurrected **1980s acoustic modem**. Made for Kiroween 2026 (Resurrection category). Every drawing and guess hops between phones **only as audible chirps**. No Wi-Fi, no Bluetooth, no server, no accounts.
 
-**Play:** https://urvishapatel1511.github.io/Ghost_frequency/ (the live site updates when changes are pushed to `main`)
+**Play:** https://urvishapatel1511.github.io/Dial-Up-Telephone/ (the live site updates when changes are pushed to `main`)
 
-> This repository started as "Ghost Frequency", a two-player ghost puzzle. It was replaced by this party game. The ghost version is still in git history (commit `62f79bf`).
+> This repository started as "Ghost Frequency" (renamed from `Ghost_frequency`), a two-player ghost puzzle. It was replaced by this party game. The ghost version is still in git history (commit `62f79bf`).
 
 ## What makes it a *bad connection*
 
