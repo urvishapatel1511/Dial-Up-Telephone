@@ -23,6 +23,8 @@ export function renderGrid(host: HTMLElement, grid: boolean[][], opts: GridOptio
   host.replaceChildren();
   host.classList.add('grid');
   host.style.gridTemplateColumns = `repeat(${size}, 1fr)`;
+  host.style.gap = size > 8 ? '2px' : '';
+  host.classList.toggle('fine', size > 8);
   host.setAttribute('aria-label', opts.label);
 
   if (!onChange) {

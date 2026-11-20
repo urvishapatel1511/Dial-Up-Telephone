@@ -5,9 +5,14 @@ import { play } from './audio/player';
 import { playEffects, type Effect } from './audio/sfx';
 import { Visualizer } from './audio/visualizer';
 import type { GgwaveFactory } from './audio/ggwave-types';
+import { concatSamples, handshakeSamples } from './audio/handshake';
+import { NOISE_INFO } from './game/noise';
 import {
   addAirtime,
+  awardGame,
   chain,
+  scores,
+  type ChainCard,
   currentStep,
   initialState,
   leaveGame,
@@ -33,7 +38,7 @@ import {
 import { randomWord } from './game/words';
 import { isOfflineReady, prepareOffline, registerServiceWorker } from './offline/offline';
 import { emptyGrid, type Grid } from './protocol/drawing';
-import { cleanName, cleanText, decodePacket, describePacket, isDrawingStep } from './protocol/packet';
+import { cleanName, cleanText, decodePacket, describePacket, DRAW_SIZE, isDrawingStep, type NoiseLevel } from './protocol/packet';
 import { SendGate } from './state/sender';
 import { renderGrid } from './ui/grid';
 
@@ -62,10 +67,12 @@ let state: State = loadState(sessionStorage);
 let joinScreen = false;
 let chosenSeat = state.profile.seat && state.profile.seat >= 2 ? state.profile.seat : 2;
 let hostPlayers = 4;
+let hostNoise: NoiseLevel = 1;
 let suggestedWord = randomWord(random01);
-let draft: Grid = emptyGrid();
+let draft: Grid = emptyGrid(DRAW_SIZE);
 let draftFor = '';
 let revealShown = 1;
+let showTimer: number | undefined;
 let currentPrimary: (() => Promise<void> | void) | null = null;
 let fxOn = localStorage.getItem(FX_KEY) !== 'off';
 let fxUntil = 0;
@@ -198,6 +205,27 @@ function renderLobby() {
 }
 
 function renderHost() {
+  const noiseBox = $('noise');
+  const noiseFocus = noiseBox.contains(document.activeElement);
+  noiseBox.replaceChildren(
+    ...([0, 1, 2] as NoiseLevel[]).map((n) => {
+      const info = NOISE_INFO[n];
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', String(n === hostNoise));
+      b.setAttribute('aria-label', `${info.name}: ${info.blurb}`);
+      const icon = Object.assign(document.createElement('span'), { className: 'big', textContent: info.icon });
+      icon.setAttribute('aria-hidden', 'true');
+      b.append(icon, Object.assign(document.createElement('b'), { textContent: info.name }), Object.assign(document.createElement('small'), { textContent: info.blurb }));
+      b.addEventListener('click', () => {
+        hostNoise = n;
+        render();
+      });
+      return b;
+    }),
+  );
+  if (noiseFocus) noiseBox.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
   $('players').textContent = String(hostPlayers);
   ($('players-minus') as HTMLButtonElement).disabled = hostPlayers <= PLAYERS_MIN;
   ($('players-plus') as HTMLButtonElement).disabled = hostPlayers >= PLAYERS_MAX;
@@ -214,7 +242,7 @@ function renderGame(phase: Phase) {
   const seat = state.profile.seat ?? 0;
   // ---- the line
   if (g) {
-    $('line-meta').textContent = `${g.host}'s game · ${g.players} players · you are seat ${g.seat}`;
+    $('line-meta').textContent = `${g.host}'s game · ${g.players} players · ${NOISE_INFO[g.noise].icon} ${NOISE_INFO[g.noise].name} line · you are seat ${g.seat}`;
     const now = currentStep(g);
     $('line').replaceChildren(
       ...Array.from({ length: g.players }, (_, i) => i + 1).map((k) => {
@@ -264,7 +292,7 @@ function renderGame(phase: Phase) {
       primary = { label: guess ? `Send my guess: "${guess}"` : 'Type a guess first', disabled: !guess, run: onSendGuess };
     } else {
       title = p.kind === 'word' ? 'Draw the secret word' : `Draw what ${p.from} guessed`;
-      text = p.kind === 'word' ? 'No letters or numbers, just a drawing! Only 8 × 8 squares, so keep it simple.' : 'No letters or numbers, just a drawing!';
+      text = 'No letters or numbers, just a drawing! Tap or drag to paint the 16 × 16 squares.';
       promptText = p.text;
       drawing = true;
       primary = { label: hasInk(draft) ? 'Send my drawing' : 'Draw something first', disabled: !hasInk(draft), run: onSendDrawing };
@@ -302,6 +330,9 @@ function renderGame(phase: Phase) {
   $('t-wait').textContent = wait;
   show('prompt-text', !!promptText);
   $('prompt-text').textContent = promptText ? `“${promptText}”` : '';
+  const staticNote = phase === 'my-turn' && !!g && g.seat > 1 && g.noise > 0;
+  show('static-note', staticNote);
+  if (staticNote) $('static-note').textContent = `${NOISE_INFO[g!.noise].icon} ${NOISE_INFO[g!.noise].name} line: this may have picked up static on the way. Go with what you see!`;
   show('prompt-drawing', !!promptDrawing);
   if (promptDrawing) renderGrid($('prompt-drawing'), promptDrawing, { label: 'The drawing you must guess' });
   show('draw-box', drawing);
@@ -320,41 +351,111 @@ function renderGame(phase: Phase) {
   currentPrimary = primary?.run ?? null;
 }
 
+function cardEl(g: Game, card: ChainCard, canAward: boolean): HTMLLIElement {
+  const li = document.createElement('li');
+  if (card.step > 0 && card.step === g.award) li.className = 'awarded';
+  const head = document.createElement('div');
+  head.className = 'who';
+  if (card.kind === 'word') head.textContent = `🔒 The secret word (${card.name})`;
+  else if (card.kind === 'drawing') head.textContent = `${card.step} · ${card.name} drew:`;
+  else if (card.kind === 'text') head.textContent = `${card.step} · ${card.name} guessed:`;
+  else head.textContent = `${card.step} · ${card.name}`;
+  if (card.step > 0 && card.step === g.award) head.textContent = `🏆 ${head.textContent}`;
+  li.append(head);
+  if (card.kind === 'drawing') {
+    // Shown as it arrived at the next player: red squares are the static.
+    const grid = document.createElement('div');
+    const shown = card.arrived?.drawing ?? card.drawing!;
+    renderGrid(grid, shown, { label: card.arrived ? `Drawing by ${card.name}, with ${card.arrived.flipped.length} squares of static` : `Drawing by ${card.name}` });
+    for (const i of card.arrived?.flipped ?? []) grid.children[i]?.classList.add('hit');
+    li.append(grid);
+    if (card.arrived) li.append(Object.assign(document.createElement('p'), { className: 'static-cap', textContent: `📡 ${card.arrived.flipped.length} squares of static (red) hit it on the line` }));
+  } else if (card.kind === 'missing') {
+    li.append(Object.assign(document.createElement('p'), { className: 'missing', textContent: 'This device missed that chirp.' }));
+  } else {
+    li.append(Object.assign(document.createElement('p'), { className: 'said', textContent: card.text ?? '' }));
+    if (card.arrived?.text) {
+      const p = document.createElement('p');
+      p.className = 'static-cap';
+      p.append('📡 arrived as ');
+      const word = document.createElement('b');
+      [...card.arrived.text].forEach((ch, i) => {
+        if (card.arrived!.changed.includes(i)) word.append(Object.assign(document.createElement('mark'), { className: 'zap', textContent: ch.toUpperCase() }));
+        else word.append(ch.toUpperCase());
+      });
+      p.append(word);
+      li.append(p);
+    }
+  }
+  if (canAward && (card.kind === 'drawing' || card.kind === 'text')) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'small award-btn';
+    b.textContent = '🏆 Worst connection';
+    b.setAttribute('aria-label', `Give the Worst Connection award to ${card.name}, hop ${card.step}`);
+    b.addEventListener('click', guard(() => send(awardGame(state, card.step), 'the award', 'Every phone that hears it shows the winner.')));
+    li.append(b);
+  }
+  return li;
+}
+
+function stopShow() {
+  if (showTimer !== undefined) {
+    window.clearInterval(showTimer);
+    showTimer = undefined;
+  }
+}
+
+function playShow() {
+  stopShow();
+  showTimer = window.setInterval(() => {
+    const g = state.game;
+    if (!g || phaseOf(state) !== 'reveal') return stopShow();
+    const cards = chain(g).cards;
+    if (revealShown >= cards.length) {
+      stopShow();
+      playFx(['success']);
+    } else {
+      revealShown++;
+      playFx(cards[revealShown - 1].arrived ? ['static'] : ['arrive']);
+    }
+    render();
+  }, 2400);
+  render();
+}
+
 function renderReveal() {
   const g = state.game!;
   const c = chain(g);
   const shown = Math.min(revealShown, c.cards.length);
-  $('chain').replaceChildren(
-    ...c.cards.slice(0, shown).map((card) => {
-      const li = document.createElement('li');
-      const head = document.createElement('div');
-      head.className = 'who';
-      if (card.kind === 'word') head.textContent = `🔒 The secret word (${card.name})`;
-      else if (card.kind === 'drawing') head.textContent = `${card.step} · ${card.name} drew:`;
-      else if (card.kind === 'text') head.textContent = `${card.step} · ${card.name} guessed:`;
-      else head.textContent = `${card.step} · ${card.name}`;
-      li.append(head);
-      if (card.kind === 'drawing') {
-        const grid = document.createElement('div');
-        renderGrid(grid, card.drawing!, { label: `Drawing by ${card.name}` });
-        li.append(grid);
-      } else if (card.kind === 'missing') {
-        const p = document.createElement('p');
-        p.className = 'missing';
-        p.textContent = 'This device missed that chirp.';
-        li.append(p);
-      } else {
-        const p = document.createElement('p');
-        p.className = 'said';
-        p.textContent = card.text ?? '';
-        li.append(p);
-      }
-      return li;
-    }),
-  );
   const all = shown >= c.cards.length;
+  const host = g.seat === 1;
+  const canAward = host && all && g.award === null && !gate.busy;
+  $('chain').replaceChildren(...c.cards.slice(0, shown).map((card) => cardEl(g, card, canAward)));
+  show('reveal-play', !all && showTimer === undefined);
   show('reveal-next', !all);
   show('reveal-all', !all);
+
+  show('award-box', all);
+  const winner = g.award !== null ? c.cards.find((x) => x.step === g.award) : null;
+  $('award-text').textContent = winner
+    ? `🏆 Worst Connection award: ${winner.name} (hop ${winner.step}). +1 point!`
+    : host
+      ? 'Vote out loud: which hop mutated the funniest? Tap 🏆 on that card. Your phone chirps the winner to everyone.'
+      : 'Vote out loud for the funniest mutation! The host taps the winner and chirps it to every phone. Keep listening.';
+  show('scores-box', all);
+  if (all) {
+    $('scores').replaceChildren(
+      ...scores(g).map((s) => {
+        const li = document.createElement('li');
+        const left = document.createElement('span');
+        left.append(`${s.seat} · ${s.name}`);
+        if (s.notes.length) left.append(Object.assign(document.createElement('span'), { className: 'notes', textContent: s.notes.join(' · ') }));
+        li.append(left, Object.assign(document.createElement('span'), { className: 'pts', textContent: `${s.points} pt${s.points === 1 ? '' : 's'}` }));
+        return li;
+      }),
+    );
+  }
   let result = '';
   if (all) {
     if (c.perfect) result = `🎉 Perfect transmission! "${g.word}" survived all ${g.players} hops.`;
@@ -365,7 +466,6 @@ function renderReveal() {
   const s = state.stats;
   const time = g.revealedAt !== null ? ` Round time: ${clock(g.revealedAt - g.startedAt)}.` : '';
   $('reveal-stats').textContent = `This device played ${s.chirpsSent} chirps (${s.bytesSent} bytes, ${(s.airtimeMs / 1000).toFixed(1)} s of sound) and heard ${s.chirpsHeard}.${time} No Wi-Fi, no Bluetooth, no internet.`;
-  const host = g.seat === 1;
   $('again').textContent = host ? '☎️ Host the next round' : '📻 Ready for the next round';
   $('again').className = all ? 'primary' : '';
   $('again-note').textContent = host
@@ -490,10 +590,13 @@ async function playOut(out: { state: State; bytes: Uint8Array }, label: string, 
   }
   await effectsDone();
   stopListening(false);
-  const samples = audio.modem.encode(out.bytes);
+  const chirp = audio.modem.encode(out.bytes);
+  // Decorative dial-up handshake in front of the chirp (same buffer, so timing is exact).
+  const lead = fxOn ? handshakeSamples(audio.ctx.sampleRate, out.bytes[out.bytes.length - 1]) : new Float32Array(0);
+  const samples = concatSamples(lead, chirp);
   const ms = audio.modem.durationMs(samples);
   playingMs = ms;
-  metrics['last chirp'] = `${ms} ms, ${out.bytes.length} bytes`;
+  metrics['last chirp'] = `${audio.modem.durationMs(chirp)} ms chirp + ${audio.modem.durationMs(lead)} ms handshake, ${out.bytes.length} bytes`;
   metrics['last tx hex'] = hex(out.bytes);
   const decoded = decodePacket(out.bytes);
   if (decoded.ok) $('chirp-info').textContent = `Inside the last chirp: ${describePacket(decoded.packet, out.bytes.length)} → ${(ms / 1000).toFixed(1)} s of sound`;
@@ -530,7 +633,9 @@ function eventMessage(e: ReceiveEvent): [string, Tone, Effect[]] | null {
   const g = state.game;
   switch (e.type) {
     case 'joined':
-      return [`Connected! ${e.host} started a ${e.players}-player game. You are seat ${e.seat}.`, 'ok', ['arrive']];
+      return [`Connected! ${e.host} started a ${e.players}-player game on a ${NOISE_INFO[e.noise].name.toLowerCase()} line. You are seat ${e.seat}.`, 'ok', ['arrive']];
+    case 'awarded':
+      return [`🏆 The Worst Connection award goes to ${e.name} (hop ${e.step})!`, 'ok', ['success']];
     case 'not-ready':
       return [`${e.host} started a game, but you're not ready yet. Pick your seat, press I'm ready, then ask ${e.host} to press Resend.`, 'error', []];
     case 'seat-too-high':
@@ -566,6 +671,7 @@ function onDecoded(bytes: Uint8Array) {
   metrics['last rx event'] = event.type;
   $('chirp-info').textContent = `Inside the last chirp heard: ${describePacket(result.packet, bytes.length)}`;
   if (event.type === 'revealed') revealShown = 1;
+  if (event.type === 'joined') stopShow();
   if (event.type === 'joined') ($('guess') as HTMLInputElement).value = '';
   if (next !== state) commit(next);
   const m = eventMessage(event);
@@ -581,7 +687,7 @@ function onDecoded(bytes: Uint8Array) {
 async function onStart() {
   const word = chosenWord();
   if (!word) return;
-  const out = startGame(state, { players: hostPlayers, word, gameId: randomU16(), now: Date.now() });
+  const out = startGame(state, { players: hostPlayers, word, gameId: randomU16(), now: Date.now(), noise: hostNoise });
   revealShown = 1;
   await send(out, 'the start signal', 'Players who were ready have joined. Now draw your word!');
 }
@@ -609,6 +715,7 @@ async function onResend() {
 }
 
 function onAgain() {
+  stopShow();
   const host = state.game?.seat === 1;
   commit(leaveGame(state));
   revealShown = 1;
@@ -635,9 +742,9 @@ function guard(fn: () => Promise<void> | void) {
 }
 
 function resetEditor() {
-  draft = emptyGrid();
+  draft = emptyGrid(DRAW_SIZE);
   renderGrid($('editor'), draft, {
-    label: 'Your drawing, 8 by 8 squares',
+    label: 'Your drawing, 16 by 16 squares',
     onChange: (g) => {
       draft = g;
       render();
@@ -652,7 +759,7 @@ $<HTMLInputElement>('name').addEventListener('input', (e) => {
 });
 $('choose-host').addEventListener('click', () => {
   commit(setProfile(state, { mode: 'host', seat: 1 }));
-  setStatus('Choose how many players, check your secret word, then start.');
+  setStatus('Choose how many players and how bad the phone line is, check your secret word, then start.');
 });
 $('choose-join').addEventListener('click', () => {
   joinScreen = true;
@@ -696,11 +803,16 @@ $('clear').addEventListener('click', () => {
   render();
 });
 $('primary').addEventListener('click', guard(() => currentPrimary?.()));
+$('reveal-play').addEventListener('click', playShow);
 $('reveal-next').addEventListener('click', () => {
+  stopShow();
   revealShown++;
+  const card = state.game && chain(state.game).cards[revealShown - 1];
+  if (card) playFx(card.arrived ? ['static'] : ['arrive']);
   render();
 });
 $('reveal-all').addEventListener('click', () => {
+  stopShow();
   revealShown = 99;
   render();
 });

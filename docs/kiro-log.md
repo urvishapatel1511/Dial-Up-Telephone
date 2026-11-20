@@ -38,6 +38,25 @@ A factual record for the hackathon write-up. It lists only what happened in this
 | Missing emoji glyphs on Windows (🪞, 🐈‍⬛), wrapped candles, a wrong status after reload (ghost version) | Edge screenshots | SVG icon, CSS, status logic |
 | A test expected "stale" for a replay the device had already heard (it is a "duplicate") | `tests/telephone.test.ts` | the test now checks both cases |
 
+## v2 "Bad Connection" upgrades
+
+The developer still found v1 boring. The agent proposed four upgrades, and the developer approved all four:
+- line static;
+- 16×16 drawings;
+- a dial-up handshake sound;
+- a reveal show with points and a voted award.
+
+The spec and steering were updated first. That included raising the packet limit from 26 to 46 bytes, a tradeoff documented in `design.md`: drawing chirps measured 3.6 s synthetic vs 2.3 s.
+
+Design decision: static is applied on screen with a seeded PRNG, never to the transmitted bytes. That keeps the real link all-or-nothing (reliable) while every device sees identical garbling.
+
+Bug found by `tsc`: a duplicated `const host` in the reveal renderer after the edit.
+
+New tests:
+- static properties;
+- that a chirp still decodes byte for byte after the synthesized handshake (synthetic);
+- scoring and the award.
+
 ## Verification (latest)
 
 - `npm.cmd run check`: typecheck, production build, and all automated tests in `tests/` (packets, game rules with a simulated room of 2–8 devices, offline build, synthetic ggwave).

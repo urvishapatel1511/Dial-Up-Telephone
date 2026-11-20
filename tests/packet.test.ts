@@ -10,9 +10,10 @@ const reseal = (b: Uint8Array) => {
   out[out.length - 1] = crc8(out.subarray(0, out.length - 1));
   return out;
 };
+const grid16 = () => emptyGrid(16);
 
 describe('packets round-trip (R1)', () => {
-  it('decodes exactly what was encoded, and never exceeds 26 bytes', () => {
+  it('decodes exactly what was encoded, and never exceeds 46 bytes', () => {
     fc.assert(
       fc.property(packetArb, (p) => {
         const b = encodePacket(p);
@@ -22,15 +23,24 @@ describe('packets round-trip (R1)', () => {
     );
   });
 
-  it('the largest packet (a 12-letter guess by a 7-letter name) is exactly 26 bytes', () => {
-    const b = encodePacket({ type: 'entry', gameId: 0xffff, step: 8, name: 'ABCDEFG', text: 'ABCDEFGHIJKL' });
-    expect(b.length).toBe(26);
-    expect(encodePacket({ type: 'entry', gameId: 1, step: 7, name: 'ABCDEFG', drawing: emptyGrid() }).length).toBe(22);
+  it('sizes: drawing entry 46 max, guess entry 26 max, award 7', () => {
+    expect(MAX_PACKET).toBe(46);
+    expect(encodePacket({ type: 'entry', gameId: 1, step: 7, name: 'ABCDEFG', drawing: grid16() }).length).toBe(46);
+    expect(encodePacket({ type: 'entry', gameId: 0xffff, step: 8, name: 'ABCDEFG', text: 'ABCDEFGHIJKL' }).length).toBe(26);
+    expect(encodePacket({ type: 'award', gameId: 1, step: 3 }).length).toBe(7);
   });
 
-  it('odd steps must carry a drawing, even steps a guess', () => {
-    expect(() => encodePacket({ type: 'entry', gameId: 1, step: 2, name: 'A', drawing: emptyGrid() })).toThrow();
+  it('start carries the static level', () => {
+    for (const noise of [0, 1, 2] as const) {
+      const r = decodePacket(encodePacket({ type: 'start', gameId: 9, players: 4, name: 'Asha', noise }));
+      expect(r.ok && r.packet.type === 'start' && r.packet.noise).toBe(noise);
+    }
+  });
+
+  it('odd steps must carry a 16×16 drawing, even steps a guess', () => {
+    expect(() => encodePacket({ type: 'entry', gameId: 1, step: 2, name: 'A', drawing: grid16() })).toThrow();
     expect(() => encodePacket({ type: 'entry', gameId: 1, step: 1, name: 'A', text: 'cat' })).toThrow();
+    expect(() => encodePacket({ type: 'entry', gameId: 1, step: 1, name: 'A', drawing: emptyGrid(8) })).toThrow();
   });
 
   it('cleans text and names, and rejects invalid ones', () => {
@@ -40,31 +50,42 @@ describe('packets round-trip (R1)', () => {
     expect(cleanText('café')).toBeNull();
     expect(cleanName('Urvisha')).toBe('Urvisha');
     expect(cleanName('Urvisha P')).toBeNull();
-    expect(() => encodePacket({ type: 'start', gameId: 1, players: 9, name: 'A' })).toThrow();
-    expect(() => encodePacket({ type: 'start', gameId: 1, players: 1, name: 'A' })).toThrow();
+    expect(() => encodePacket({ type: 'start', gameId: 1, players: 9, name: 'A', noise: 0 })).toThrow();
+    expect(() => encodePacket({ type: 'start', gameId: 1, players: 4, name: 'A', noise: 3 as never })).toThrow();
   });
 
-  it('dedupe key depends on game, type, and step only', () => {
-    expect(packetKey({ type: 'entry', gameId: 5, step: 3, name: 'A', drawing: emptyGrid() })).toBe('5:entry:3');
-    expect(packetKey({ type: 'start', gameId: 5, players: 4, name: 'A' })).toBe('5:start:0');
+  it('dedupe key depends on game, type, and step only; the award is once per game', () => {
+    expect(packetKey({ type: 'entry', gameId: 5, step: 3, name: 'A', drawing: grid16() })).toBe('5:entry:3');
+    expect(packetKey({ type: 'award', gameId: 5, step: 3 })).toBe(packetKey({ type: 'award', gameId: 5, step: 6 }));
   });
 });
 
-describe('invalid packets are rejected (R1.4)', () => {
+describe('invalid packets are rejected (R1.5)', () => {
   const good = encodePacket({ type: 'entry', gameId: 300, step: 2, name: 'Bo', text: 'fish' });
 
-  it('length, magic, checksum, type', () => {
+  it('length, magic (including the old v1 format), checksum, type', () => {
     expect(decodePacket(good.subarray(0, 5))).toEqual({ ok: false, error: 'too-short' });
-    expect(decodePacket(new Uint8Array(27))).toEqual({ ok: false, error: 'too-long' });
-    const m = good.slice();
-    m[0] = 0xa4; // the old ghost protocol
-    expect(decodePacket(reseal(m))).toEqual({ ok: false, error: 'bad-magic' });
+    expect(decodePacket(new Uint8Array(47))).toEqual({ ok: false, error: 'too-long' });
+    for (const magic of [0xd1, 0xa4]) {
+      const m = good.slice();
+      m[0] = magic;
+      expect(decodePacket(reseal(m))).toEqual({ ok: false, error: 'bad-magic' });
+    }
     const c = good.slice();
     c[c.length - 1] ^= 1;
     expect(decodePacket(c)).toEqual({ ok: false, error: 'bad-checksum' });
     const t = good.slice();
     t[1] = 9;
     expect(decodePacket(reseal(t))).toEqual({ ok: false, error: 'bad-type' });
+  });
+
+  it('a static level is only allowed on start, and only 0-2', () => {
+    const e = good.slice();
+    e[1] |= 1 << 4;
+    expect(decodePacket(reseal(e))).toEqual({ ok: false, error: 'bad-type' });
+    const s = encodePacket({ type: 'start', gameId: 1, players: 4, name: 'A', noise: 2 });
+    s[1] = (s[1] & 0x0f) | (3 << 4);
+    expect(decodePacket(reseal(s))).toEqual({ ok: false, error: 'bad-type' });
   });
 
   it('a step that disagrees with the payload kind is rejected', () => {
@@ -77,9 +98,12 @@ describe('invalid packets are rejected (R1.4)', () => {
     const b = good.slice();
     b[4] = 10;
     expect(decodePacket(reseal(b)).ok).toBe(false);
-    const s = encodePacket({ type: 'start', gameId: 1, players: 4, name: 'A' });
+    const s = encodePacket({ type: 'start', gameId: 1, players: 4, name: 'A', noise: 1 });
     s[4] = 9;
     expect(decodePacket(reseal(s))).toEqual({ ok: false, error: 'bad-count' });
+    const a = encodePacket({ type: 'award', gameId: 1, step: 2 });
+    a[4] = 0;
+    expect(decodePacket(reseal(a))).toEqual({ ok: false, error: 'bad-count' });
   });
 
   it('non-printable text', () => {
@@ -100,7 +124,7 @@ describe('invalid packets are rejected (R1.4)', () => {
 
   it('random bytes decode only if they are a canonical encoding', () => {
     fc.assert(
-      fc.property(fc.uint8Array({ maxLength: 30 }), (bytes) => {
+      fc.property(fc.uint8Array({ maxLength: 50 }), (bytes) => {
         const r = decodePacket(bytes);
         if (r.ok) expect(encodePacket(r.packet)).toEqual(bytes);
       }),

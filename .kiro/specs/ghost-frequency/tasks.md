@@ -2,27 +2,22 @@
 
 `[x]` done · `[ ]` open · **AUTO** = `npm.cmd run check` · **BROWSER** = `npm.cmd run screens` (Edge, no sound) · **HW** = real devices.
 
-## Kept from the ghost version
-- [x] ggwave sound link, safe send gate, audio states, offline mode, Pages workflow, roving-tabindex grid
+## v1 (pushed, live)
+- [x] Packets, game state, lobby, turns, reveal, play again, offline, 48 tests, browser checks
 
-## Build
-- [x] 1. Spec rewrite (requirements, design, tasks, steering)
-- [x] 2. Packet format (`0xD1`), ≤ 26 bytes. AUTO: round-trip property, max size, every rejection, single-byte corruption
-- [x] 3. Game state. AUTO, in a simulated room of devices:
-  - a full 5-player round; secrecy (prompt = previous entry only);
-  - seat too high / not ready → Resend; other games ignored;
-  - missed chirp → Resend; duplicates; failed playback;
-  - reveal with missing entries; perfect transmission; play again; stale chirps; refresh at every step
-- [x] 4. Word list (50 drawable words ≤ 12 characters)
-- [x] 5. UI: lobby, seat picker, host setup, the line, drawing and guessing turns, waiting/sent, reveal one card at a time, play again
-- [x] 6. Ghost game code and tests removed (kept in git history at `62f79bf`)
-- [x] 7. Docs: README, hardware test, hardware log, Kiro log
-- [x] 8. BROWSER: 12 checks and screenshots at phone and laptop sizes
+## v2 "Bad Connection" (local, not pushed yet)
+- [x] 1. Spec and steering updated (packet limit 46 bytes for 16×16 drawings, line static, handshake, points, award)
+- [x] 2. 16×16 drawings: `packGrid`/`unpackGrid` for n×n, packet v2 (`0xD2`). AUTO: 16×16 round trip, 46-byte max, v1 magic rejected
+- [x] 3. Line static (`src/game/noise.ts`): Clear / Crackly / Haunted chosen by the host, carried in `start`. AUTO: deterministic, exact flip counts, clear = identity, garbled text stays valid, bytes on air are exact, every device and refresh agree
+- [x] 4. Dial-up handshake (`src/audio/handshake.ts`). AUTO (synthetic): a chirp after the handshake still decodes byte for byte; the handshake alone never decodes; ~1.5 s, peak < 0.4. Behind the effects switch
+- [x] 5. Reveal show: ▶ Play the show (auto-advance + crackle), static shown on each hop (red squares, highlighted letters)
+- [x] 6. Points (drawer + guesser when the guess matches what the drawer saw, one typo allowed for 5+ letters) and the Worst Connection award chirp. AUTO: scoring on clear and haunted lines, award once, host only, other games ignored
+- [x] 7. BROWSER: 13 checks + screenshots (line picker, static note, static in the reveal, award on another device)
+- [x] 8. Docs: README, hardware test, Kiro log
 
-## Next
-- [ ] Push to GitHub (developer's go-ahead) and confirm the Pages deploy
-- [ ] HW: a 3+ device round in a quiet room, then with talking
-- [ ] HW: missed chirp → Resend; seat too high → Resend
-- [ ] HW: offline reload on all devices
-- [ ] Playtest: is it fun? How long is a round?
+## Next (developer)
+- [ ] Test on the local server with 2+ devices (`docs/hardware-test.md`)
+- [ ] HW: drawing chirps (~3.6 s synthetic) decode within 2 tries at 1 m; compare with effects on and off (handshake)
+- [ ] Playtest: is Crackly or Haunted funnier? Is 16×16 better? How long is a round?
+- [ ] Push v2 when happy (assistant pushes only when asked)
 - [ ] Demo video < 3 min, Kiro write-up, blog/social posts, submission checklist

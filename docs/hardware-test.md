@@ -26,7 +26,8 @@ You need **3 or more devices** (laptop + 2 phones is fine). With only two device
 | 3 | Host | Draw the word, **Send my drawing** | Seat 2: "Your turn!", with the drawing. Others: "Heard Asha (seat 1). Now seat 2 is up." |
 | 4 | Seat 2 | Type a guess, send | Seat 3 sees only the guess. The line updates on every screen |
 | 5 | Everyone | Continue to the last seat | Host: "Gather around for the reveal!" |
-| 6 | Host | **Reveal the chain** | Every phone shows the chain card by card, and they all match |
+| 6 | Host | **Reveal the chain** → ▶ Play the show | Every phone shows the same chain and the same static (red squares, changed letters) |
+| 6b | Everyone | Vote out loud; the host taps 🏆 on a card | Every phone highlights that card, and the scores match |
 | 7 | Everyone | Players press **Ready for the next round**, then the host presses **Host the next round** → Start | A new round starts. An old chirp replayed is ignored |
 
 ## D. Extra checks
@@ -35,7 +36,8 @@ You need **3 or more devices** (laptop + 2 phones is fine). With only two device
 - **Seat too high:** a player picks seat 6 in a 4-player game. They're told to pick a lower seat. After fixing it, the host's **Resend** lets them join.
 - **Refresh** a phone mid-round. It resumes and offers **Resume listening**.
 - **Secrecy:** while waiting, no phone shows the secret word or anyone else's entry.
-- **Effects off** (⚙ Settings): chirps still play.
+- **Effects off** (⚙ Settings): no dial-up handshake, and chirps still play. Compare how often drawing chirps are missed with effects on and off.
+- **Line quality:** play one round Crackly and one Haunted. Which was funnier?
 
 ## E. Measure
 

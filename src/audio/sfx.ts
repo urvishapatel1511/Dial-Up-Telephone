@@ -20,7 +20,7 @@ function tone(ctx: AudioContext, freq: number, start: number, dur: number, type:
   o.stop(start + dur + 0.05);
 }
 
-export type Effect = 'arrive' | 'success' | 'fail' | 'creak' | 'fade';
+export type Effect = 'arrive' | 'success' | 'fail' | 'creak' | 'fade' | 'static';
 
 const EFFECTS: Record<Effect, (ctx: AudioContext) => number> = {
   arrive(ctx) {
@@ -64,9 +64,24 @@ const EFFECTS: Record<Effect, (ctx: AudioContext) => number> = {
     tone(ctx, 466, t, 1.0, 'sine', VOLUME * 0.6, 116);
     return 1.05;
   },
+  /** A short burst of crackly line static. */
+  static(ctx) {
+    const t = ctx.currentTime;
+    const len = Math.floor(ctx.sampleRate * 0.4);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() < 0.12 ? (Math.random() * 2 - 1) * (1 - i / len) : 0;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const g = ctx.createGain();
+    g.gain.value = VOLUME * 2;
+    src.connect(g).connect(ctx.destination);
+    src.start(t);
+    return 0.45;
+  },
 };
 
-export const EFFECT_SECONDS: Record<Effect, number> = { arrive: 0.65, success: 0.75, fail: 0.55, creak: 0.75, fade: 1.05 };
+export const EFFECT_SECONDS: Record<Effect, number> = { arrive: 0.65, success: 0.75, fail: 0.55, creak: 0.75, fade: 1.05, static: 0.45 };
 
 /** Plays effects one after another. Returns the total length in seconds. */
 export function playEffects(ctx: AudioContext, list: Effect[]): number {

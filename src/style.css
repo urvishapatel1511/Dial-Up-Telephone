@@ -420,16 +420,16 @@ button:disabled {
   user-select: none;
 }
 .editor.grid {
-  width: min(100%, 21rem);
+  width: min(100%, 26rem);
   margin: 0.5rem auto;
 }
 .prompt-drawing.grid,
 .chain .grid {
-  width: min(70%, 15rem);
+  width: min(85%, 20rem);
   margin: 0.5rem auto;
 }
 .chain .grid {
-  width: 9rem;
+  width: min(100%, 11rem);
 }
 .cell {
   background: #232838;
@@ -449,6 +449,100 @@ button.cell:focus-visible {
 }
 
 /* ---------- reveal ---------- */
+/* ---------- line static, scores, award ---------- */
+.noise {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+.noise button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.6rem 0.3rem;
+}
+.noise .big {
+  font-size: 1.6rem;
+}
+.noise small {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.noise button[aria-checked='true'] {
+  border: 2px solid var(--phosphor);
+  box-shadow: 0 0 14px rgba(124, 247, 160, 0.4);
+}
+.static-note {
+  color: var(--amber);
+  font-size: 0.9rem;
+  text-align: center;
+}
+.grid.fine .cell {
+  border-radius: 2px;
+}
+.cell.hit.on {
+  background: var(--danger);
+  box-shadow: 0 0 6px rgba(255, 122, 149, 0.8);
+}
+.cell.hit:not(.on) {
+  outline: 2px solid var(--danger);
+  outline-offset: -2px;
+}
+.static-cap {
+  font-size: 0.8rem;
+  color: var(--danger);
+  margin: 0.2rem 0 0;
+}
+mark.zap {
+  background: var(--danger);
+  color: #1a0008;
+  border-radius: 3px;
+  padding: 0 0.08em;
+}
+.chain li.awarded {
+  border-color: var(--amber);
+  box-shadow: 0 0 20px rgba(255, 204, 102, 0.5);
+}
+.award-btn {
+  margin-top: 0.5rem;
+}
+.award-box {
+  border: 1px dashed var(--amber);
+  border-radius: 12px;
+  padding: 0.6rem 0.8rem;
+  margin-top: 0.8rem;
+  color: var(--amber);
+  font-weight: 600;
+}
+.scores {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+.scores li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.45rem 0.7rem;
+}
+.scores li:first-child {
+  border-color: var(--phosphor);
+}
+.scores .notes {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.scores .pts {
+  font-weight: 700;
+  color: var(--phosphor);
+  white-space: nowrap;
+}
+
 .chain {
   list-style: none;
   padding: 0;

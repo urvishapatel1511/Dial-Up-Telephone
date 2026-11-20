@@ -10,7 +10,7 @@ import { mkdirSync } from 'node:fs';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { preview, type PreviewServer } from 'vite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { initialState, receive, revealGame, sendEntry, setProfile, startGame, STORAGE_KEY, type Outgoing, type State } from '../src/game/telephone';
+import { awardGame, initialState, promptFor, receive, revealGame, sendEntry, setProfile, startGame, STORAGE_KEY, type Outgoing, type State } from '../src/game/telephone';
 import { emptyGrid } from '../src/protocol/drawing';
 import { decodePacket } from '../src/protocol/packet';
 
@@ -19,9 +19,12 @@ const OUT = 'docs/screenshots';
 const PHONE = { width: 390, height: 844 };
 const LAPTOP = { width: 1366, height: 820 };
 
+/** 8-character rows scaled up to a 16×16 drawing. */
 const art = (rows: string[]) => {
-  const g = emptyGrid();
-  rows.forEach((r, i) => [...r].forEach((c, j) => (g[i][j] = c === '#')));
+  const g = emptyGrid(16);
+  rows.forEach((r, i) => [...r].forEach((c, j) => {
+    if (c === '#') g[2 * i][2 * j] = g[2 * i + 1][2 * j] = g[2 * i][2 * j + 1] = g[2 * i + 1][2 * j + 1] = true;
+  }));
   return g;
 };
 const PUMPKIN = art(['...##...', '..####..', '.######.', '##.##.##', '########', '#.#..#.#', '.######.', '..####..']);
@@ -37,7 +40,7 @@ function scenario() {
     d.forEach((s, i) => i !== from && (d[i] = receive(s, r.packet, 1000).state));
   };
   const snaps: Record<string, State> = {};
-  play(0, startGame(d[0], { players: 4, word: 'pumpkin', gameId: 77, now: 0 }));
+  play(0, startGame(d[0], { players: 4, word: 'pumpkin', gameId: 77, now: 0, noise: 2 }));
   snaps.hostDraw = d[0];
   snaps.seat3Waiting = d[2];
   play(0, sendEntry(d[0], { drawing: PUMPKIN }));
@@ -51,6 +54,8 @@ function scenario() {
   play(0, revealGame(d[0], 95_000));
   snaps.revealHost = d[0];
   snaps.revealSeat4 = d[3];
+  play(0, awardGame(d[0], 3));
+  snaps.awardedSeat2 = d[1];
   return snaps;
 }
 
@@ -108,12 +113,15 @@ describe('Dial-Up Telephone in a real browser', () => {
     await page.close();
   });
 
-  it('host setup: player count and secret word', async () => {
+  it('host setup: player count, line quality, and secret word', async () => {
     const page = await open(LAPTOP);
     await page.fill('#name', 'Asha');
     await page.click('#choose-host');
     await page.click('#players-plus');
     expect(await page.textContent('#players')).toBe('5');
+    expect(await page.getAttribute('#noise button:nth-child(2)', 'aria-checked')).toBe('true'); // Crackly by default
+    await page.click('#noise button:nth-child(3)');
+    expect(await page.getAttribute('#noise button:nth-child(3)', 'aria-checked')).toBe('true');
     await page.fill('#custom-word', 'haunted cat');
     expect(await page.textContent('#word')).toBe('haunted cat');
     await shot(page, '03-host-setup-laptop');
@@ -154,7 +162,10 @@ describe('Dial-Up Telephone in a real browser', () => {
     await waiting.close();
     const drawer = await open(PHONE, s.seat3Draw);
     const text = (await drawer.textContent('body')) ?? '';
-    expect(text).toContain('orange'); // the previous guess: allowed
+    const seen = promptFor(s.seat3Draw.game!);
+    expect(seen?.kind).toBe('text');
+    expect(text).toContain(seen!.kind === 'text' ? seen!.text : '?'); // the previous guess, with static: allowed
+    expect(await drawer.isVisible('#static-note')).toBe(true);
     expect(text).not.toContain('pumpkin'); // the secret word: hidden
     expect(await drawer.isVisible('#prompt-drawing')).toBe(false); // no earlier drawing
     await drawer.close();
@@ -166,9 +177,23 @@ describe('Dial-Up Telephone in a real browser', () => {
       // a reload shows the whole chain
       expect(await page.$$eval('#chain li', (l) => l.length)).toBe(5);
       expect(await page.textContent('#reveal-result')).toContain('survived 1 hop');
+      // haunted line: static is shown on the hops it changed
+      expect(await page.$$eval('.cell.hit', (c) => c.length)).toBeGreaterThan(0);
+      expect(await page.isVisible('#scores-box')).toBe(true);
+      const awardButtons = await page.$$eval('.award-btn', (b) => b.length);
+      expect(awardButtons).toBe(key === 'revealHost' ? 4 : 0); // only the host can award
       await shot(page, `10-reveal-${tag}`);
       await page.close();
     }
+  });
+
+  it('after the award chirp, every device highlights the winner and its point', async () => {
+    const page = await open(PHONE, s.awardedSeat2);
+    expect(await page.textContent('#award-text')).toContain('Worst Connection award: Cy');
+    expect(await page.$$eval('.chain li.awarded', (l) => l.length)).toBe(1);
+    expect(await page.textContent('#scores')).toContain('Worst Connection award');
+    await shot(page, '11-awarded-phone');
+    await page.close();
   });
 
   it('no console errors on any screen', () => {

@@ -24,9 +24,9 @@
     <section id="settings" class="card settings" aria-label="Settings" hidden>
       <label class="switch">
         <input id="fx-toggle" type="checkbox" checked />
-        Sound effects (dial tones, jingles)
+        Sound effects (dial-up handshake before each chirp, jingles, static)
       </label>
-      <p class="small">The <b>chirps</b> are how the game sends drawings and guesses between phones, so they always play. This switch only turns off the decorative effects.</p>
+      <p class="small">The <b>chirps</b> are how the game sends drawings and guesses between phones, so they always play. This switch only turns off the decorative sounds. Turn it off if chirps are often missed.</p>
       <div class="offline">
         <button type="button" class="prepare small">📦 Prepare for offline play</button>
         <span class="offline-state" role="status" aria-live="polite"></span>
@@ -58,7 +58,7 @@
     <!-- LOBBY -->
     <section id="lobby" class="card intro" hidden>
       <p class="lede">
-        Remember <b>telephone</b>? Now every message hops between phones as the screech of a <b>1980s dial-up modem</b>. One player draws a secret word, the next guesses the drawing, the next draws the guess… then everyone sees how badly it mutated. No internet. Only sound.
+        Remember <b>telephone</b>? Now every message hops between phones as the screech of a <b>1980s dial-up modem</b>, and the bad old phone line adds <b>static</b> on the way. One player draws a secret word, the next guesses the drawing, the next draws the guess… then everyone watches how badly it mutated, scores points, and votes for the worst connection. No internet. Only sound.
       </p>
       <ol class="guide">
         <li><b>3–8 players</b>, each with a phone or laptop. Sit in a circle in seat order.</li>
@@ -108,6 +108,10 @@
         </div>
       </div>
       <div class="field">
+        <span class="label" id="noise-label">Phone line quality</span>
+        <div id="noise" class="noise" role="radiogroup" aria-labelledby="noise-label"></div>
+      </div>
+      <div class="field">
         <span class="label">Secret word (only you see it)</span>
         <p id="word" class="word"></p>
         <div class="row">
@@ -140,6 +144,7 @@
 
         <div id="prompt-text" class="prompt-word" hidden></div>
         <div id="prompt-drawing" class="prompt-drawing" hidden></div>
+        <p id="static-note" class="static-note" hidden></p>
 
         <div id="draw-box" hidden>
           <div id="editor" class="editor"></div>
@@ -164,8 +169,17 @@
       <p id="reveal-result" class="result" aria-live="polite"></p>
       <ol id="chain" class="chain"></ol>
       <div class="actions">
-        <button id="reveal-next" type="button" class="primary">Show the next hop</button>
+        <button id="reveal-play" type="button" class="primary">▶ Play the show</button>
+        <button id="reveal-next" type="button">Next hop</button>
         <button id="reveal-all" type="button" class="ghostly">Show all</button>
+      </div>
+      <div id="award-box" class="award-box" hidden>
+        <p id="award-text"></p>
+      </div>
+      <div id="scores-box" hidden>
+        <h3>Scores</h3>
+        <ol id="scores" class="scores"></ol>
+        <p class="small">A drawer and a guesser each score 1 point when the guess matches what the drawer was given. The Worst Connection award is worth 1 point.</p>
       </div>
       <details class="stats">
         <summary>Inside the chirps</summary>
