@@ -1,27 +1,40 @@
 # Hardware log
 
-No physical-device results have been recorded yet. Fill this in from `docs/hardware-test.md`. Only real speaker-to-microphone runs belong here.
+No physical-device results have been recorded yet (v1, v2, or v3). Fill this in from `docs/hardware-test.md`. Only real speaker-to-microphone runs belong here.
 
 Devices (model / browser): 1 ____________ 2 ____________ 3 ____________ 4 ____________
 
 ## Chirps
 
-| Date | From → to | Room | Distance | Chirp s | Chirps until heard | Correct on screen? | Notes |
+| Date | Packet (bytes) | From → to | Room | Distance | Chirp s | Chirps until heard | Correct on screen? | Notes |
+|---|---|---|---|---|---|---|---|---|
+| | first drawing (58) | | quiet | | | | | |
+| | drawing (46) | | quiet | | | | | |
+| | guess (≤ 26) | | talking | | | | | |
+| | request (7) | | | | | | | |
+
+## Rounds and matches
+
+| Date | Mode | Players | Line | First time? | Length (min) | Same chain, scores, totals on all devices? | Problems |
 |---|---|---|---|---|---|---|---|
-| | | quiet | | | | | |
-| | | talking | | | | | |
+| | Quick Round | | | | | | |
+| | Party Match | | | | | | |
 
-## Rounds / playtests
-
-| Date | Players | First time? | Round length (min) | Reveal matched on all devices? | Fun? (1–5) | Problems |
-|---|---|---|---|---|---|---|
-| | | | | | | |
-
-## Checklist (section D)
+## Recovery checks (section D)
 
 | Check | Result | Date |
 |---|---|---|
-| Missed chirp → Resend | | |
-| Seat too high → fix → Resend | | |
-| Refresh mid-round | | |
+| Missed hop before the reveal → Ask → only the author answered | | |
+| Host missing a hop → no Reveal → Ask → Reveal appeared | | |
+| Missed hop after the reveal → Ask → filled in | | |
+| Missed reveal → Ask for the reveal | | |
+| Same seat twice → warning | | |
+| Seat too high → fix → Resend the start signal | | |
+| Refresh mid-match → totals kept | | |
 | Offline reload on every device | | |
+
+## Group playtests (section F)
+
+| Date | Players | Setup (min) | Longest wait | Drawing tools used / problems | Funniest moment | Recovery used / worked | Another one? (yes/no) |
+|---|---|---|---|---|---|---|---|
+| | | | | | | | |

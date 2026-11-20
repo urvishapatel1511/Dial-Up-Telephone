@@ -11,7 +11,7 @@ A factual record for the hackathon write-up. It lists only what happened in this
   - pure, Node-testable logic;
   - a test for every change;
   - fast-check for codecs and dedupe;
-  - packets ≤ 26 bytes;
+  - a packet size limit (26 bytes in v1, 46 in v2, 58 in v3);
   - automated, browser, and hardware results reported separately;
   - `npm.cmd`;
   - no push without being asked.
@@ -57,8 +57,27 @@ New tests:
 - that a chirp still decodes byte for byte after the synthesized handshake (synthetic);
 - scoring and the award.
 
+## v3 "Party Line" upgrades
+
+The developer asked for a faster, funnier, more replayable game, with a priority list: recovery, drawing tools, static, less waiting, prompts, reveal, Party Match. The spec (`requirements.md`, `design.md`, `tasks.md`) and steering (packet limit now 58 bytes) were rewritten before code.
+
+Two bugs the developer reported were confirmed by reading the v2 code before changing it:
+- the host could reach "ready to reveal" while an earlier entry was missing on its device (v2 only checked the last step);
+- entries resent after the reveal were ignored (v2 rejected every entry once revealed).
+
+Design decisions recorded in `design.md`:
+- **One answerer per request:** only the author of a hop answers a `need` chirp automatically (the host answers for the reveal). Others get a manual "Send it for them" button. A random back-off for every holder was rejected, because two phones could still chirp at once.
+- **The first drawer picks the word**, carried in the step-1 packet (58 bytes). The host no longer has an advantage in a match.
+- **Odd player counts:** the room guesses the last drawing out loud, so every seat has exactly one scoring chance per round (tested for 2–8 players and every rotation).
+- **Handshake only on start**, never on turns, requests, or resends.
+
+Bugs found during v3 work:
+- `tsc`: two button handlers returned `Promise<boolean>` where `void` was expected.
+- Browser check: **Previous** did nothing right after **Show all** (the card count was not clamped). Fixed in `src/main.ts`.
+- Screenshot review: the 🛟 emoji has no glyph on Windows (rendered as a box). Replaced with 💪. The host's own hop showed "♪ played" even after later hops proved it arrived; any later hop now counts as confirmation.
+
 ## Verification (latest)
 
-- `npm.cmd run check`: typecheck, production build, and all automated tests in `tests/` (packets, game rules with a simulated room of 2–8 devices, offline build, synthetic ggwave).
-- `npm.cmd run screens`: lobby, join, host setup, every turn type, waiting, sent, ready-to-reveal, reveal, secrecy, keyboard drawing, and no console errors, at 390×844 and 1366×820. Screenshots are in `docs/screenshots/`. No sound travels in this check.
+- `npm.cmd run check`: typecheck, production build, and 107 automated tests in 10 files (`tests/`): packets v3, game rules with a simulated room of 2–8 devices (missing hops, targeted recovery, recovery after the reveal, duplicates, stale rounds, seat clashes, scoring, awards, Party Match totals, refresh), rotation and fairness, prompts, static twists, the drawing model, captions, offline build, and synthetic ggwave (58-byte packet and handshake schedule).
+- `npm.cmd run screens`: 15 checks in headless Edge at 390×844 and 1366×820: lobby, join, host setup, first drawer with word reroll and drawing tools (keyboard, mouse stroke, undo/redo, eraser, large brush, clear), bigger canvas, static notes, secrecy, waiting/sent, host missing hops, odd-count room guess, reveal, results, recovery from the reveal, Party Match final, no console errors. Screenshots are in `docs/screenshots/`. No sound travels in this check.
 - **Not done:** any real speaker-to-microphone run, phone browsers, offline reload on devices, or playtests.

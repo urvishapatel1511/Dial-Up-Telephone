@@ -629,6 +629,212 @@ dt {
   font-weight: 600;
 }
 
+/* ---------- v3: host choices ---------- */
+.choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.5rem;
+}
+.choices.two {
+  grid-template-columns: 1fr 1fr;
+}
+.choices button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.6rem 0.3rem;
+}
+.choices .big {
+  font-size: 1.5rem;
+}
+.choices small {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.choices button[aria-checked='true'] {
+  border: 2px solid var(--phosphor);
+  box-shadow: 0 0 14px rgba(124, 247, 160, 0.4);
+}
+
+/* ---------- v3: word, static note, room guess ---------- */
+.word-box {
+  border: 1px dashed var(--amber);
+  border-radius: 12px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.6rem 0;
+}
+.static-note::before {
+  content: '📡 ';
+}
+.static-note {
+  border: 1px solid var(--amber);
+  border-radius: 10px;
+  padding: 0.5rem 0.7rem;
+}
+.room-box {
+  border: 1px dashed var(--violet);
+  border-radius: 12px;
+  padding: 0.6rem;
+  margin: 0.6rem 0;
+}
+.room-answer {
+  font-weight: 700;
+  color: var(--amber);
+  text-align: center;
+}
+button[aria-pressed='true'] {
+  border: 2px solid var(--phosphor);
+  box-shadow: 0 0 10px rgba(124, 247, 160, 0.35);
+}
+
+/* ---------- v3: drawing tools ---------- */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.5rem 0;
+}
+.toolbar button {
+  flex: 1 1 5.5rem;
+}
+.draw-box.big .editor.grid {
+  width: min(calc(100vw - 1rem), 40rem);
+  max-width: none;
+  margin-left: 50%;
+  transform: translateX(-50%);
+  gap: 1px !important;
+}
+
+/* ---------- v3: the line ---------- */
+.line .sub {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+.line li.missed {
+  border-color: var(--danger);
+}
+.line li.missed .st {
+  color: var(--danger);
+}
+.conflict {
+  color: var(--danger);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+/* ---------- v3: recovery ---------- */
+.recovery {
+  border-color: var(--amber);
+}
+.recovery h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+  color: var(--amber);
+}
+.rec-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+.rec-list li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* ---------- v3: reveal ---------- */
+.show-controls button {
+  flex: 1 1 7rem;
+}
+.chain li.current {
+  border-color: var(--violet);
+  box-shadow: 0 0 16px rgba(185, 156, 255, 0.4);
+}
+.pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+}
+.pair figure {
+  margin: 0;
+}
+.pair figcaption {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.chain .pair .grid {
+  width: 100%;
+  margin: 0.3rem 0;
+}
+.arrived .cell.hit {
+  animation: zap 1.2s ease-in-out 2;
+}
+@keyframes zap {
+  50% {
+    opacity: 0.25;
+  }
+}
+mark.zap {
+  text-decoration: underline wavy;
+}
+.caption {
+  font-size: 0.9rem;
+  color: var(--text);
+  margin: 0.4rem 0 0;
+}
+.badges {
+  color: var(--amber);
+  font-weight: 700;
+  margin: 0.2rem 0;
+}
+.pick {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+  color: var(--text);
+  font-weight: 600;
+}
+select {
+  font: inherit;
+  min-height: 44px;
+  color: var(--text);
+  background: #0c0e14;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.3rem 0.5rem;
+}
+.final {
+  text-align: center;
+  border: 2px solid var(--phosphor);
+  border-radius: 14px;
+  padding: 0.8rem;
+  margin: 0.8rem 0;
+}
+.final-text {
+  font-size: 1.3rem;
+  font-weight: 800;
+  color: var(--phosphor);
+}
+.confetti {
+  font-size: 1.6rem;
+  margin: 0;
+  animation: bounce 0.8s ease-in-out 4 alternate;
+}
+@keyframes bounce {
+  to {
+    transform: translateY(-8px) scale(1.05);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

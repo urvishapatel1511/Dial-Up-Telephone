@@ -1,32 +1,50 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { FLIPS, noisyDrawing } from '../src/game/noise';
 import {
-  awardGame,
+  arrivedEntry,
+  askFor,
+  autoAnswer,
+  awardOptions,
+  canRelay,
   chain,
+  chosenWord,
   close,
-  scores,
+  entryAt,
   initialState,
+  knownMissed,
   leaveGame,
   loadState,
+  matchOver,
+  matchStandings,
+  missingSteps,
+  myStep,
+  nextRound,
+  outgoingFor,
   phaseOf,
   promptFor,
   receive,
   resendBytes,
+  resendEntry,
+  resendStart,
   revealGame,
   saveState,
+  scores,
+  seatOfStep,
   sendEntry,
+  sendResults,
   setProfile,
+  setWordDraft,
   startGame,
   type KeyValueStore,
   type Outgoing,
+  type Results,
   type State,
 } from '../src/game/telephone';
-import { WORDS } from '../src/game/words';
+import { suggestWord } from '../src/game/words';
 import { emptyGrid, type Grid } from '../src/protocol/drawing';
-import { decodePacket, encodePacket, type Packet } from '../src/protocol/packet';
+import { decodePacket, encodePacket, type NoiseLevel, type Packet } from '../src/protocol/packet';
 import { SendGate } from '../src/state/sender';
-import { gridArb16 as gridArb } from './arbitraries';
+import { gridArb16 as gridArb, packetArb } from './arbitraries';
 
 const hear = (b: Uint8Array): Packet => {
   const r = decodePacket(b);
@@ -47,11 +65,15 @@ function memoryStore(): KeyValueStore {
 
 const NAMES = ['Asha', 'Bo', 'Cy', 'Dee', 'Eli', 'Fay', 'Gus', 'Hal'];
 
-/** A room of N devices. Every chirp reaches every device except the sender (and anyone listed as deaf). */
-function room(n: number) {
-  const devices: State[] = NAMES.slice(0, n).map((name, i) =>
-    i === 0 ? setProfile(initialState(), { name }) : setProfile(initialState(), { name, mode: 'player', seat: i + 1 }),
-  );
+/**
+ * A room of N devices (device i sits in seat i + 1). Every chirp reaches
+ * every device except the sender and anyone listed as deaf.
+ */
+function room(n: number, extras: { name: string; seat: number }[] = []) {
+  const devices: State[] = [
+    ...NAMES.slice(0, n).map((name, i) => (i === 0 ? setProfile(initialState(), { name }) : setProfile(initialState(), { name, mode: 'player', seat: i + 1 }))),
+    ...extras.map((x) => setProfile(initialState(), { name: x.name, mode: 'player', seat: x.seat })),
+  ];
   const log: string[] = [];
   const r = {
     devices,
@@ -70,392 +92,465 @@ function room(n: number) {
         log.push(`${i + 1}:${res.event.type}`);
       });
     },
-    start(word = 'pumpkin', gameId = 0x4242) {
-      return r.play(0, startGame(devices[0], { players: n, word, gameId, now: 0 }));
+    start(opts: { gameId?: number; noise?: NoiseLevel; mode?: 'quick' | 'match'; deaf?: number[] } = {}) {
+      return r.play(0, startGame(devices[0], { players: n, gameId: opts.gameId ?? 0x4242, now: 0, noise: opts.noise ?? 0, mode: opts.mode }), opts.deaf);
     },
-    turn(seat: number, deaf: number[] = []) {
-      const d = devices[seat - 1];
-      const content = seat % 2 === 1 ? { drawing: sketch(seat) } : { text: seat === 2 ? 'pumpkin' : `guess ${seat}` };
-      return r.play(seat - 1, sendEntry(d, content), deaf);
+    /** Device index that plays step k this round. */
+    author(k: number) {
+      return seatOfStep(devices[0].game!, k) - 1;
+    },
+    turn(k: number, deaf: number[] = []) {
+      const i = r.author(k);
+      let d = devices[i];
+      if (k === 1) d = setWordDraft(d, { custom: 'pumpkin' });
+      const content = k % 2 === 1 ? { drawing: sketch(k) } : { text: k === 2 ? 'pumpkin' : `guess ${k}` };
+      return r.play(i, sendEntry(d, content), deaf);
+    },
+    playAll(deafBy: Record<number, number[]> = {}) {
+      for (let k = 1; k <= n; k++) r.turn(k, deafBy[k] ?? []);
+    },
+    reveal(force = false, deaf: number[] = []) {
+      return r.play(0, revealGame(devices[0], 9000, force), deaf);
+    },
+    results(res: Partial<Results> = {}, deaf: number[] = []) {
+      return r.play(0, sendResults(devices[0], { funniest: 0, recognizable: 0, recovery: 0, final: 0, ...res }), deaf);
     },
   };
   return r;
 }
 
-describe('a full round (acceptance)', () => {
-  it('5 players: everyone joins by sound, sees only the previous entry, and gets the same reveal', () => {
-    const r = room(5);
-    r.start();
-    expect(r.devices.slice(1).map(phaseOf)).toEqual(['waiting', 'waiting', 'waiting', 'waiting']);
-    expect(phaseOf(r.devices[0])).toBe('my-turn');
-    expect(promptFor(r.devices[0].game!)).toEqual({ kind: 'word', text: 'pumpkin' });
-    expect(r.devices[1].game?.word).toBeNull(); // players never learn the word before the reveal
-
-    for (let seat = 1; seat <= 5; seat++) {
-      // Only the seat whose turn it is has something to respond to.
-      expect(r.devices.map(phaseOf).filter((p) => p === 'my-turn')).toHaveLength(1);
-      expect(phaseOf(r.devices[seat - 1])).toBe('my-turn');
-      if (seat > 1) {
-        const prompt = promptFor(r.devices[seat - 1].game!)!;
-        expect(prompt.kind).toBe(seat % 2 === 0 ? 'drawing' : 'text');
-        if (prompt.kind !== 'word') expect(prompt.from).toBe(NAMES[seat - 2]);
-      }
-      r.turn(seat);
-    }
-    expect(phaseOf(r.devices[0])).toBe('ready-to-reveal');
-    expect(r.devices.slice(1).map(phaseOf)).toEqual(['sent', 'sent', 'sent', 'sent']);
-
-    r.play(0, revealGame(r.devices[0], 9000));
-    const chains = r.devices.map((d) => chain(d.game!));
-    for (const c of chains) {
-      expect(c).toEqual(chains[0]);
-      expect(c.cards.map((x) => x.kind)).toEqual(['word', 'drawing', 'text', 'drawing', 'text', 'drawing']);
-      expect(c.cards[2].text).toBe('pumpkin');
-      expect(c.survivedHops).toBe(3); // the guess at step 4 mutated
-      expect(c.perfect).toBeNull(); // odd N ends on a drawing
-    }
-    expect(r.devices.map(phaseOf).every((p) => p === 'reveal')).toBe(true);
-  });
-
-  it('a perfect transmission is detected (case and spacing ignored)', () => {
-    const r = room(2);
-    r.start('Witch Hat');
-    r.turn(1);
-    r.play(1, sendEntry(r.devices[1], { text: '  witch  HAT ' }));
-    r.play(0, revealGame(r.devices[0], 1));
-    expect(chain(r.devices[1].game!)).toMatchObject({ perfect: true, survivedHops: 2 });
-  });
-
-  it('every built-in word fits the 12-character limit', () => {
-    for (const w of WORDS) expect(w.length).toBeLessThanOrEqual(12);
-    expect(new Set(WORDS).size).toBe(WORDS.length);
-  });
-});
-
-describe('joining (R2)', () => {
-  it('a player whose seat is too high does not join, and can join after picking a lower seat', () => {
-    const r = room(3);
-    r.devices[2] = setProfile(r.devices[2], { seat: 5 });
-    const start = r.start();
-    expect(r.log).toContain('3:seat-too-high');
-    expect(r.devices[2].game).toBeNull();
-    r.devices[2] = setProfile(r.devices[2], { seat: 3 });
-    r.broadcast(resendBytes(r.devices[0])!, 0); // the host resends the start
-    expect(r.devices[2].game?.seat).toBe(3);
-    expect(Array.from(resendBytes(r.devices[0])!)).toEqual(Array.from(start.bytes));
-  });
-
-  it('a player who is not ready yet is told so, and a resend lets them join', () => {
-    const r = room(3);
-    r.devices[1] = setProfile(r.devices[1], { mode: null });
-    r.start();
-    expect(r.log).toContain('2:not-ready');
-    r.devices[1] = setProfile(r.devices[1], { mode: 'player', seat: 2 });
-    r.broadcast(resendBytes(r.devices[0])!, 0);
-    expect(phaseOf(r.devices[1])).toBe('waiting');
-  });
-
-  it('a player in an unfinished game ignores starts from another table', () => {
-    const r = room(3);
-    r.start();
-    const other = startGame(setProfile(initialState(), { name: 'Zed' }), { players: 4, word: 'cat', gameId: 7, now: 0 })!;
-    const res = receive(r.devices[1], hear(other.bytes), 0);
-    expect(res.event.type).toBe('other-game');
-    expect(res.state).toBe(r.devices[1]);
-  });
-
-  it('entries from another game are ignored', () => {
-    const r = room(3);
-    r.start();
-    const foreign = encodePacket({ type: 'entry', gameId: 999, step: 1, name: 'X', drawing: sketch(1) });
-    const res = receive(r.devices[1], hear(foreign), 0);
-    expect(res.event.type).toBe('other-game');
-    expect(phaseOf(res.state)).toBe('waiting');
-  });
-});
-
-describe('missed chirps, resends, duplicates (C4)', () => {
-  it('if seat 2 misses the drawing, nothing breaks; a resend gives them their turn', () => {
-    const r = room(3);
-    r.start();
-    r.turn(1, [1]); // device of seat 2 is deaf this time
-    expect(phaseOf(r.devices[1])).toBe('waiting');
-    expect(phaseOf(r.devices[2])).toBe('waiting'); // seat 3 heard step 1 but must wait for step 2
-    r.broadcast(resendBytes(r.devices[0])!, 0);
-    expect(phaseOf(r.devices[1])).toBe('my-turn');
-    expect(r.log.filter((l) => l === '3:duplicate')).toHaveLength(1); // seat 3 heard it twice, nothing changed
-  });
-
-  it('a duplicate or own echo returns the same state object', () => {
-    const r = room(3);
-    const start = r.start();
-    const again = receive(r.devices[1], hear(start.bytes), 0);
-    expect(again.event.type).toBe('duplicate');
-    expect(again.state).toBe(r.devices[1]);
-    const echo = receive(r.devices[0], hear(start.bytes), 0);
-    expect(echo.event.type).toBe('own-echo');
-  });
-
-  it('failed playback commits nothing, and the retry is byte-identical', async () => {
-    const r = room(3);
-    r.start();
-    const gate = new SendGate();
-    let host = r.devices[0];
-    const first = sendEntry(host, { drawing: sketch(1) })!;
-    const res = await gate.run(first, () => Promise.reject(new Error('speaker busy')), (s) => (host = s));
-    expect(res).toMatchObject({ ok: false, reason: 'failed' });
-    expect(phaseOf(host)).toBe('my-turn');
-    const retry = sendEntry(host, { drawing: sketch(1) })!;
-    expect(Array.from(retry.bytes)).toEqual(Array.from(first.bytes));
-  });
-
-  it('the gate allows one send at a time', async () => {
-    const gate = new SendGate();
-    let release!: () => void;
-    const slow = gate.run({ state: 1, bytes: new Uint8Array(1) }, () => new Promise<number>((ok) => (release = () => ok(1))), () => {});
-    expect(await gate.run({ state: 2, bytes: new Uint8Array(1) }, async () => 1, () => {})).toEqual({ ok: false, reason: 'busy' });
-    release();
-    await slow;
-  });
-
-  it('a device that missed a middle entry still reveals, showing "not heard"', () => {
+describe('joining (lobby and seats)', () => {
+  it('ready players join with their seat; the host is seat 1', () => {
     const r = room(4);
     r.start();
+    expect(r.devices.map((d) => d.game?.seat)).toEqual([1, 2, 3, 4]);
+    expect(r.devices.map((d) => phaseOf(d))).toEqual(['my-turn', 'waiting', 'waiting', 'waiting']);
+  });
+
+  it('not ready, or a seat above N: not joined, and not remembered, so a resend can still work', () => {
+    const r = room(3, [{ name: 'Zed', seat: 5 }]);
+    r.devices.push(setProfile(initialState(), { name: 'Late' }));
+    const out = r.start();
+    expect(r.log).toContain('4:seat-too-high');
+    expect(r.log).toContain('5:not-ready');
+    expect(r.devices[3].game).toBeNull();
+    r.devices[4] = setProfile(r.devices[4], { mode: 'player', seat: 3 });
+    r.devices[4] = receive(r.devices[4], hear(out.bytes), 5).state;
+    expect(r.devices[4].game?.seat).toBe(3);
+    // the host can resend the start signal byte-identically at any time in the round
+    expect(Array.from(resendStart(r.devices[0])!.bytes)).toEqual(Array.from(out.bytes));
+  });
+
+  it('a player in an unfinished round ignores other games', () => {
+    const r = room(3);
+    r.start();
+    const other = startGame(setProfile(initialState(), { name: 'Nemo' }), { players: 3, gameId: 0x1111, now: 0 })!;
+    const before = r.devices[1];
+    const res = receive(before, hear(other.bytes), 1);
+    expect(res.event.type).toBe('other-game');
+    expect(res.state).toBe(before);
+  });
+});
+
+describe('a Quick Round', () => {
+  it('each player sees only the previous entry; the first drawer chooses the word privately', () => {
+    const r = room(4);
+    r.start();
+    const host = r.devices[0].game!;
+    expect(promptFor(host)).toEqual({ kind: 'word', text: suggestWord(0, host.gameId, 0) });
+    r.devices[0] = setWordDraft(r.devices[0], { variant: 3 });
+    expect(chosenWord(r.devices[0].game!)).toBe(suggestWord(0, host.gameId, 3));
     r.turn(1);
-    r.turn(2, [3]); // seat 4's device misses step 2
+    expect(r.devices[0].game!.word).toBe('pumpkin');
+    const p2 = promptFor(r.devices[1].game!);
+    expect(p2?.kind).toBe('drawing');
+    expect(promptFor(r.devices[2].game!)).toBeNull(); // seat 3 sees nothing yet
+    r.turn(2);
+    const p3 = promptFor(r.devices[2].game!);
+    expect(p3).toEqual({ kind: 'text', text: 'pumpkin', from: 'Bo', altered: false });
     r.turn(3);
     r.turn(4);
-    r.play(0, revealGame(r.devices[0], 1));
-    expect(chain(r.devices[3].game!).cards[2].kind).toBe('missing');
-    expect(chain(r.devices[1].game!).cards[2].kind).toBe('text');
+    expect(phaseOf(r.devices[0])).toBe('ready-to-reveal');
+    r.reveal();
+    expect(r.devices.every((d) => phaseOf(d) === 'reveal')).toBe(true);
+    const chains = r.devices.map((d) => JSON.stringify(chain(d.game!)));
+    expect(new Set(chains).size).toBe(1);
   });
 
-  it('property: replays never produce more accepted changes than distinct chirps', () => {
-    fc.assert(
-      fc.property(fc.array(fc.nat({ max: 4 }), { maxLength: 30 }), (order) => {
-        const r = room(4);
-        const chirps = [r.start().bytes, r.turn(1).bytes, r.turn(2).bytes, r.turn(3).bytes, r.turn(4).bytes];
-        let s = r.devices[2];
-        for (const i of order) s = receive(s, hear(chirps[i]), 0).state;
-        expect(s).toEqual(r.devices[2]);
-      }),
-      { numRuns: 50 },
-    );
+  it('a step can only be sent on your turn, with valid content', () => {
+    const r = room(3);
+    r.start();
+    expect(sendEntry(r.devices[1], { text: 'cat' })).toBeNull(); // not my turn yet
+    expect(sendEntry(r.devices[0], { drawing: emptyGrid(16) })).toBeNull(); // empty drawing
+    expect(sendEntry(setWordDraft(r.devices[0], { custom: 'x'.repeat(13) }), { drawing: sketch(1) })).toBeNull(); // bad word
+  });
+
+  it('sending commits only after playback succeeds (safe send gate)', async () => {
+    const r = room(3);
+    r.start();
+    const out = sendEntry(setWordDraft(r.devices[0], { custom: 'cat' }), { drawing: sketch(1) })!;
+    const gate = new SendGate();
+    let committed: State | null = null;
+    const fail = await gate.run(out, () => Promise.reject(new Error('speaker')), (s) => (committed = s));
+    expect(fail.ok).toBe(false);
+    expect(committed).toBeNull();
+    const ok = await gate.run(out, () => Promise.resolve(1), (s) => (committed = s));
+    expect(ok.ok).toBe(true);
+    expect(committed!.game!.entries['1']).toBeDefined();
   });
 });
 
-describe('secrecy before the reveal (R3.2)', () => {
-  it("each player's prompt is only the previous entry", () => {
-    fc.assert(
-      fc.property(gridArb, (drawing) => {
-        const r = room(4);
-        r.start();
-        r.play(0, sendEntry(r.devices[0], { drawing }));
-        r.turn(2);
-        const p = promptFor(r.devices[2].game!);
-        expect(p).toEqual({ kind: 'text', text: 'pumpkin', from: 'Bo' });
-        expect(promptFor(r.devices[3].game!)).toBeNull(); // seat 4 has nothing to respond to yet
-      }),
-      { numRuns: 20 },
-    );
-  });
-
-  it('the host cannot reveal before the last step is heard, and players cannot reveal', () => {
-    const r = room(3);
-    r.start();
-    r.turn(1);
-    expect(revealGame(r.devices[0], 0)).toBeNull();
-    r.turn(2);
-    r.turn(3);
-    expect(revealGame(r.devices[1], 0)).toBeNull();
-    expect(revealGame(r.devices[0], 0)).not.toBeNull();
-  });
-
-  it('nobody can send out of turn, or send an empty drawing or guess', () => {
-    const r = room(3);
-    r.start();
-    expect(sendEntry(r.devices[1], { text: 'cat' })).toBeNull(); // seat 2 before step 1
-    expect(sendEntry(r.devices[0], { drawing: emptyGrid(16) })).toBeNull();
-    const tiny = emptyGrid(8);
-    tiny[0][0] = true;
-    expect(sendEntry(r.devices[0], { drawing: tiny })).toBeNull(); // drawings are 16×16
-    r.turn(1);
-    expect(sendEntry(r.devices[1], { text: '   ' })).toBeNull();
-  });
-});
-
-describe('play again and refresh (R4.4, R5.4)', () => {
-  it('play again: players stay ready, join the next start, and stale chirps are ignored', () => {
-    const r = room(3);
-    r.start();
-    const oldDrawing = r.turn(1).bytes;
-    r.turn(2);
-    r.turn(3);
-    r.play(0, revealGame(r.devices[0], 1));
-    r.play(0, startGame(r.devices[0], { players: 3, word: 'bat', gameId: 0x4242, now: 2 })); // same random ID is bumped
-    expect(r.devices[0].game?.gameId).not.toBe(0x4242);
-    expect(r.devices.map(phaseOf)).toEqual(['my-turn', 'waiting', 'waiting']);
-    // Heard before: rejected as a duplicate. Never heard (but the game is retired): rejected as stale.
-    const replay = receive(r.devices[1], hear(oldDrawing), 0);
-    expect(replay.event.type).toBe('duplicate');
-    expect(replay.state).toBe(r.devices[1]);
-    const neverHeard = { ...r.devices[1], seen: [] };
-    const late = receive(neverHeard, hear(oldDrawing), 0);
-    expect(late.event.type).toBe('stale');
-    expect(late.state).toBe(neverHeard);
-  });
-
-  it('leaving clears the game and the last chirp but keeps the profile and dedupe memory', () => {
-    const r = room(3);
-    r.start();
-    const left = leaveGame(r.devices[1]);
-    expect(left).toMatchObject({ game: null, lastSent: null });
-    expect(left.profile.seat).toBe(2);
-    expect(left.retired).toContain(0x4242);
-    expect(phaseOf(left)).toBe('ready');
-  });
-
-  it('state survives save/load at every step', () => {
+describe('missed-message recovery (R1)', () => {
+  it('tracks known missed hops per device', () => {
     const r = room(4);
-    const snaps: State[] = [];
     r.start();
-    snaps.push(...r.devices);
-    for (let k = 1; k <= 4; k++) {
-      r.turn(k);
-      snaps.push(...r.devices);
-    }
-    r.play(0, revealGame(r.devices[0], 1));
-    snaps.push(...r.devices);
-    for (const s of snaps) {
-      const store = memoryStore();
-      saveState(store, s);
-      expect(loadState(store)).toEqual(s);
+    r.turn(1, [2]); // seat 3 misses step 1
+    expect(knownMissed(r.devices[2].game!)).toEqual([]);
+    r.turn(2);
+    expect(knownMissed(r.devices[2].game!)).toEqual([1]);
+    expect(phaseOf(r.devices[2])).toBe('my-turn'); // can still play
+  });
+
+  it('BUG FIX: the host is not offered a normal reveal while an earlier hop is missing', () => {
+    const r = room(4);
+    r.start();
+    r.playAll({ 2: [0] }); // the host misses step 2
+    expect(phaseOf(r.devices[0])).toBe('missing');
+    expect(missingSteps(r.devices[0].game!)).toEqual([2]);
+    expect(revealGame(r.devices[0], 1)).toBeNull();
+    expect(revealGame(r.devices[0], 1, true)).not.toBeNull(); // labelled fallback
+  });
+
+  it('a request is answered automatically by exactly one device: the author', () => {
+    const r = room(5);
+    r.start();
+    r.playAll({ 3: [0] });
+    const ask = r.play(0, askFor(r.devices[0], 3));
+    expect(hear(ask.bytes)).toEqual({ type: 'need', gameId: 0x4242, step: 3 });
+    const answering = r.devices.map((d) => autoAnswer(d, 3).length > 0);
+    expect(answering).toEqual([false, false, true, false, false]);
+    // others who hold it may relay by hand, but never automatically
+    expect(r.devices.map((d) => canRelay(d, 3))).toEqual([false, true, false, true, true]);
+    // the answer is byte-identical to the original chirp
+    const [packet] = autoAnswer(r.devices[2], 3);
+    expect(Array.from(encodePacket(packet))).toEqual(Array.from(resendEntry(r.devices[2], 3)!.bytes));
+    r.play(2, outgoingFor(r.devices[2], packet));
+    expect(phaseOf(r.devices[0])).toBe('ready-to-reveal');
+  });
+
+  it('for every room size and missing hop, at most one device answers automatically', () => {
+    for (let n = 2; n <= 8; n++) {
+      for (let miss = 1; miss <= n; miss++) {
+        const r = room(n);
+        r.start();
+        r.playAll({ [miss]: [0] });
+        const answering = r.devices.map((d, i) => (autoAnswer(d, miss).length > 0 ? i : -1)).filter((i) => i >= 0);
+        expect(answering).toEqual([r.author(miss)]);
+      }
     }
   });
 
-  it('corrupt or old-version storage falls back to a fresh state', () => {
-    const store = memoryStore();
-    store.setItem('dialup:v2', '{nope');
-    expect(loadState(store)).toEqual(initialState());
-    store.setItem('dialup:v2', JSON.stringify({ ...initialState(), v: 1 }));
-    expect(loadState(store)).toEqual(initialState());
+  it('requests are never remembered as seen, so the same hop can be asked for again', () => {
+    const r = room(3);
+    r.start();
+    const need = encodePacket({ type: 'need', gameId: 0x4242, step: 1 });
+    const a = receive(r.devices[1], hear(need), 1);
+    const b = receive(a.state, hear(need), 2);
+    expect(a.event).toEqual({ type: 'need', step: 1 });
+    expect(b.event).toEqual({ type: 'need', step: 1 });
+    expect(b.state).toBe(r.devices[1]);
+  });
+
+  it('BUG FIX: entries that arrive after the reveal fill gaps and never overwrite', () => {
+    const r = room(4);
+    r.start();
+    r.playAll({ 1: [2] }); // seat 3 misses the first drawing
+    r.reveal();
+    const g3 = r.devices[2].game!;
+    expect(phaseOf(r.devices[2])).toBe('reveal');
+    expect(missingSteps(g3)).toEqual([1]);
+    expect(chain(g3).cards[1].kind).toBe('missing');
+    // seat 3 asks; the host (author of step 1) answers
+    r.play(2, askFor(r.devices[2], 1));
+    const [answer] = autoAnswer(r.devices[0], 1);
+    const res = receive(r.devices[2], answer, 5);
+    expect(res.event).toMatchObject({ type: 'entry', step: 1, recovered: true });
+    expect(chain(res.state.game!).cards[1].kind).toBe('drawing');
+    expect(res.state.game!.word).toBe('pumpkin');
+    // a different entry for a filled step changes nothing
+    const fake: Packet = { type: 'entry', gameId: 0x4242, step: 2, name: 'Imp', text: 'ghost' };
+    const again = receive(res.state, fake, 6);
+    expect(again.state).toBe(res.state);
+    expect(entryAt(again.state.game!, 2)?.text).toBe('pumpkin');
+  });
+
+  it('step 0 asks the host for the reveal and the results', () => {
+    const r = room(3);
+    r.start();
+    r.playAll();
+    expect(autoAnswer(r.devices[0], 0)).toEqual([]); // not revealed yet
+    r.reveal(false, [1]);
+    r.results({ funniest: 2 }, [1]);
+    expect(phaseOf(r.devices[1])).toBe('sent');
+    const reply = autoAnswer(r.devices[0], 0);
+    expect(reply.map((p) => p.type)).toEqual(['reveal', 'results']);
+    expect(r.devices.slice(1).every((d) => autoAnswer(d, 0).length === 0)).toBe(true);
+    let s = r.devices[1];
+    for (const p of reply) s = receive(s, p, 7).state;
+    expect(phaseOf(s)).toBe('reveal');
+    expect(s.game!.results?.funniest).toBe(2);
+  });
+
+  it('a results chirp alone also reveals on a device that missed the reveal', () => {
+    const r = room(3);
+    r.start();
+    r.playAll();
+    r.reveal(false, [2]);
+    r.results({}, []);
+    expect(phaseOf(r.devices[2])).toBe('reveal');
+  });
+
+  it('duplicates, own echoes, and stale rounds change nothing', () => {
+    const r = room(3);
+    const start1 = r.start();
+    const e1 = r.turn(1);
+    const dup = receive(r.devices[1], hear(e1.bytes), 1);
+    expect(dup.event.type).toBe('duplicate');
+    expect(dup.state).toBe(r.devices[1]);
+    expect(receive(r.devices[0], hear(e1.bytes), 1).event.type).toBe('own-echo');
+    r.turn(2);
+    r.turn(3);
+    r.reveal();
+    r.play(0, startGame(r.devices[0], { players: 3, gameId: 0x5151, now: 0 }));
+    for (const old of [start1.bytes, e1.bytes]) {
+      const res = receive(r.devices[2], hear(old), 2);
+      expect(res.event.type).toBe('stale');
+      expect(res.state).toBe(r.devices[2]);
+    }
+  });
+
+  it('property: hearing any packet a second time never changes state', () => {
+    fc.assert(
+      fc.property(packetArb, (p) => {
+        const r = room(3);
+        r.start({ gameId: p.gameId });
+        const once = receive(r.devices[1], p, 1).state;
+        const twice = receive(once, p, 2);
+        if (p.type !== 'start') expect(twice.state).toBe(once);
+      }),
+    );
+  });
+
+  it('two phones on the same seat are reported, not merged silently', () => {
+    const r = room(3, [{ name: 'Zed', seat: 2 }]);
+    r.start();
+    r.turn(1);
+    r.turn(2); // Bo plays seat 2
+    expect(r.log).toContain('4:conflict');
+    expect(r.devices[3].game!.conflict).toBe('Bo');
+  });
+
+  it('Resend replays identical bytes and is ignored by everyone who already heard it', () => {
+    const r = room(3);
+    r.start();
+    const out = r.turn(1);
+    expect(Array.from(resendBytes(r.devices[0])!)).toEqual(Array.from(out.bytes));
+    const before = r.devices.map((d) => d);
+    r.broadcast(resendBytes(r.devices[0])!, 0);
+    expect(r.devices).toEqual(before);
   });
 });
 
-/** A room on a noisy line (the start packet carries the level). */
-function noisyRoom(n: number, noise: 1 | 2, gameId = 0x1d2c) {
-  const r = room(n);
-  r.play(0, startGame(r.devices[0], { players: n, word: 'pumpkin', gameId, now: 0, noise }));
-  return r;
-}
-
-describe('line static in the game (R3.2-R3.5)', () => {
-  it('every device learns the static level from the start chirp', () => {
-    const r = noisyRoom(3, 2);
-    expect(r.devices.map((d) => d.game?.noise)).toEqual([2, 2, 2]);
+describe('static on screen (R3)', () => {
+  it('Clear passes entries exactly; Haunted changes what the next player sees, never the stored entry', () => {
+    for (const noise of [0, 2] as const) {
+      const r = room(3);
+      r.start({ noise });
+      r.turn(1);
+      const g = r.devices[1].game!;
+      const p = promptFor(g)!;
+      expect(p.kind).toBe('drawing');
+      expect(entryAt(g, 1)!.drawing).toEqual(sketch(1));
+      if (noise === 0) expect(p.kind === 'drawing' && p.drawing).toEqual(sketch(1));
+      else expect(p.kind === 'drawing' && p.altered).toBe(true);
+    }
   });
 
-  it('the next player sees the entry with static; every device and every refresh agrees', () => {
-    const r = noisyRoom(4, 2);
+  it('every device computes the same static', () => {
+    const r = room(4);
+    r.start({ noise: 2 });
+    r.playAll();
+    r.reveal();
+    const a = arrivedEntry(r.devices[3].game!, entryAt(r.devices[3].game!, 2)!);
+    const b = arrivedEntry(r.devices[0].game!, entryAt(r.devices[0].game!, 2)!);
+    expect(a).toEqual(b);
+  });
+});
+
+describe('scoring, awards, and fairness (R7)', () => {
+  it('matching guesses score the drawer and guesser; awards are +1; every device agrees', () => {
+    const r = room(4);
+    r.start();
+    r.playAll();
+    r.reveal();
+    expect(sendResults(r.devices[1], { funniest: 2, recognizable: 0, recovery: 0, final: 0 })).toBeNull(); // only the host
+    expect(sendResults(r.devices[0], { funniest: 1, recognizable: 0, recovery: 0, final: 0 })).toBeNull(); // step 1 is not a response
+    expect(sendResults(r.devices[0], { funniest: 0, recognizable: 2, recovery: 0, final: 0 })).toBeNull(); // 2 is not a drawing
+    expect(sendResults(r.devices[0], { funniest: 0, recognizable: 0, recovery: 0, final: 1 })).toBeNull(); // even N: no room guess
+    r.results({ funniest: 4, recognizable: 3 });
+    const all = r.devices.map((d) => JSON.stringify(scores(d.game!)));
+    expect(new Set(all).size).toBe(1);
+    const pts = Object.fromEntries(scores(r.devices[0].game!).map((s) => [s.seat, s.points]));
+    expect(pts).toEqual({ 1: 1, 2: 1, 3: 1, 4: 1 });
+    expect(sendResults(r.devices[0], { funniest: 2, recognizable: 0, recovery: 0, final: 0 })).toBeNull(); // once per round
+  });
+
+  it('odd player count: the room guesses the last drawing, so its drawer can score', () => {
+    const r = room(3);
+    r.start();
+    r.playAll();
+    r.reveal();
+    expect(awardOptions(r.devices[0].game!).finalGuess).toBe(true);
+    r.results({ final: 1 });
+    const s3 = scores(r.devices[1].game!).find((s) => s.seat === 3)!;
+    expect(s3.points).toBe(1);
+    expect(s3.notes).toContain('the room guessed your final drawing');
+  });
+
+  it('Best Recovery is only offered for responses to clues that static changed', () => {
+    const clean = room(4);
+    clean.start({ noise: 0 });
+    clean.playAll();
+    clean.reveal();
+    expect(awardOptions(clean.devices[0].game!).recovery).toEqual([]);
+    const haunted = room(4);
+    haunted.start({ noise: 2 });
+    haunted.playAll();
+    haunted.reveal();
+    expect(awardOptions(haunted.devices[0].game!).recovery.length).toBeGreaterThan(0);
+  });
+
+  it('retries never change scores', () => {
+    const r = room(3);
+    r.start();
+    r.playAll();
+    r.reveal();
+    const res = r.results({ funniest: 2, final: 1 });
+    const before = r.devices.map((d) => JSON.stringify(scores(d.game!)));
+    r.broadcast(res.bytes, 0);
+    for (let k = 1; k <= 3; k++) r.broadcast(resendEntry(r.devices[r.author(k)], k)!.bytes, r.author(k));
+    expect(r.devices.map((d) => JSON.stringify(scores(d.game!)))).toEqual(before);
+  });
+
+  it('close() ignores case, spaces, and punctuation, and allows one typo for 5+ letters', () => {
+    expect(close('Witch Hat', 'witchhat')).toBe(true);
+    expect(close('pumpkn', 'pumpkin')).toBe(true);
+    expect(close('cat', 'bat')).toBe(false);
+  });
+});
+
+describe('Party Match (R7)', () => {
+  function playMatch(n: number) {
+    const r = room(n);
+    r.start({ mode: 'match', gameId: 0x7000 });
+    const firstDrawers: number[] = [];
+    for (let round = 1; round <= 3; round++) {
+      firstDrawers.push(r.author(1) + 1);
+      expect(r.devices.every((d) => d.game?.round === round)).toBe(true);
+      r.playAll();
+      r.reveal();
+      r.results({ funniest: 2, final: n % 2 === 1 ? 1 : 0 });
+      if (round < 3) r.play(0, nextRound(r.devices[0], 0x7000 + round, round * 1000));
+    }
+    return { r, firstDrawers };
+  }
+
+  it('the first drawer moves one seat each round', () => {
+    expect(playMatch(3).firstDrawers).toEqual([1, 2, 3]);
+    expect(playMatch(5).firstDrawers).toEqual([1, 2, 3]);
+    expect(playMatch(2).firstDrawers).toEqual([1, 2, 1]);
+  });
+
+  it('totals are the same on every device, everyone gets the same chances, and the match ends after round 3', () => {
+    const { r } = playMatch(3);
+    const totals = r.devices.map((d) => JSON.stringify(matchStandings(d)));
+    expect(new Set(totals).size).toBe(1);
+    const st = matchStandings(r.devices[0]);
+    expect(st.rounds).toBe(3);
+    // each round: one scoring chance per seat (all succeed here) + Funniest to the step-2 guesser, who rotates
+    expect(st.standings.map((s) => s.points)).toEqual([4, 4, 4]);
+    expect(r.devices.every((d) => matchOver(d))).toBe(true);
+    expect(nextRound(r.devices[0], 1, 1)).toBeNull();
+  });
+
+  it('progress survives a refresh', () => {
+    const { r } = playMatch(4);
+    const store = memoryStore();
+    saveState(store, r.devices[2]);
+    const back = loadState(store);
+    expect(matchStandings(back)).toEqual(matchStandings(r.devices[2]));
+    expect(back.match?.rounds.length).toBe(2);
+    expect(matchOver(back)).toBe(true);
+  });
+
+  it('the next round needs a revealed round, and only the host can start it', () => {
+    const r = room(3);
+    r.start({ mode: 'match' });
+    expect(nextRound(r.devices[0], 9, 0)).toBeNull();
+    r.playAll();
+    r.reveal();
+    expect(nextRound(r.devices[1], 9, 0)).toBeNull();
+    expect(nextRound(r.devices[0], 9, 0)).not.toBeNull();
+  });
+
+  it('a player who missed the reveal still joins the next round of the same match', () => {
+    const r = room(3);
+    r.start({ mode: 'match', gameId: 0x7100 });
+    r.playAll();
+    r.reveal(false, [2]);
+    r.results({}, [2]);
+    expect(phaseOf(r.devices[2])).toBe('sent');
+    r.play(0, nextRound(r.devices[0], 0x7101, 5));
+    expect(r.devices[2].game?.round).toBe(2);
+    expect(myStep(r.devices[2].game!)).toBe(2);
+  });
+
+  it('leaving a match round keeps the points; ending the match clears them', () => {
+    const r = room(3);
+    r.start({ mode: 'match' });
+    r.playAll();
+    r.reveal();
+    r.results({ funniest: 2 });
+    expect(leaveGame(r.devices[1]).match?.rounds.length).toBe(1);
+    expect(leaveGame(r.devices[1], true).match).toBeNull();
+  });
+});
+
+describe('persistence (per tab)', () => {
+  it('round-trips through storage and rejects other versions', () => {
+    const r = room(3);
+    r.start();
     r.turn(1);
-    const prompt = promptFor(r.devices[1].game!)!;
-    expect(prompt.kind).toBe('drawing');
-    const expected = noisyDrawing(sketch(1), r.devices[0].game!.gameId, 1, 2).grid;
-    expect(prompt.kind === 'drawing' && prompt.drawing).toEqual(expected);
-    expect(expected).not.toEqual(sketch(1)); // static really changed it
-    // a refresh rebuilds the same prompt
     const store = memoryStore();
     saveState(store, r.devices[1]);
-    expect(promptFor(loadState(store).game!)).toEqual(prompt);
+    expect(loadState(store)).toEqual(r.devices[1]);
+    store.setItem('dialup:v3', JSON.stringify({ v: 2, profile: {}, seen: [], sent: [] }));
+    expect(loadState(store)).toEqual(initialState());
+    store.setItem('dialup:v3', '{not json');
+    expect(loadState(store)).toEqual(initialState());
   });
 
-  it('the bytes on the air are exact: static is never transmitted', () => {
-    const r = noisyRoom(3, 2);
-    const out = r.turn(1);
-    const heard = hear(out.bytes);
-    expect(heard.type === 'entry' && 'drawing' in heard && heard.drawing).toEqual(sketch(1));
-    expect(r.devices[2].game?.entries['1'].drawing).toEqual(sketch(1));
-  });
-
-  it('the reveal shows what static changed, and is identical on every device', () => {
-    const r = noisyRoom(5, 2);
-    for (let k = 1; k <= 5; k++) r.turn(k);
-    r.play(0, revealGame(r.devices[0], 1));
-    const chains = r.devices.map((d) => chain(d.game!));
-    for (const c of chains) expect(c).toEqual(chains[0]);
-    const cards = chains[0].cards;
-    expect(cards[1].arrived?.flipped).toHaveLength(FLIPS[2]); // hop 1 drawing
-    expect(cards[2].arrived?.changed.length).toBeGreaterThan(0); // hop 2 guess, haunted always changes a letter
-    expect(cards[5].arrived).toBeNull(); // last hop: nobody after it
-    expect(cards[0].arrived).toBeNull(); // the secret word is never garbled
-  });
-
-  it('the host still draws the exact secret word', () => {
-    const r = noisyRoom(3, 2);
-    expect(promptFor(r.devices[0].game!)).toEqual({ kind: 'word', text: 'pumpkin' });
-  });
-});
-
-describe('matching, points, and the Worst Connection award (R4.5-R4.7)', () => {
-  it('close() ignores case and punctuation and allows one typo in long words', () => {
-    expect(close('Pumpkin!', 'pumpkin')).toBe(true);
-    expect(close('pumpkn', 'pumpkin')).toBe(true);
-    expect(close('cat', 'bat')).toBe(false); // short words must match exactly
-    expect(close('pump', 'pumpkin')).toBe(false);
-    expect(close('', 'x')).toBe(false);
-  });
-
-  it('a correct guess scores the drawer and the guesser; wrong guesses score nothing', () => {
-    const r = room(4); // clear line
-    r.start('pumpkin');
-    r.turn(1);
-    r.play(1, sendEntry(r.devices[1], { text: 'Pumpkin' })); // right
-    r.turn(3);
-    r.play(3, sendEntry(r.devices[3], { text: 'spider' })); // wrong
-    r.play(0, revealGame(r.devices[0], 1));
-    const s = scores(r.devices[2].game!);
-    const pts = Object.fromEntries(s.map((x) => [x.name, x.points]));
-    expect(pts).toEqual({ Asha: 1, Bo: 1, Cy: 0, Dee: 0 });
-    expect(s[0].notes.length).toBe(1);
-  });
-
-  it('on a noisy line, the guess is scored against what the drawer actually saw', () => {
-    const r = noisyRoom(4, 2);
-    r.turn(1);
-    r.play(1, sendEntry(r.devices[1], { text: 'pumpkin' }));
-    const seenByCy = promptFor(r.devices[2].game!);
-    expect(seenByCy?.kind).toBe('text');
-    r.turn(3);
-    r.play(3, sendEntry(r.devices[3], { text: seenByCy!.kind === 'text' ? seenByCy!.text : '' }));
-    r.play(0, revealGame(r.devices[0], 1));
-    const pts = Object.fromEntries(scores(r.devices[0].game!).map((x) => [x.name, x.points]));
-    expect(pts.Cy).toBe(1);
-    expect(pts.Dee).toBe(1);
-  });
-
-  it('the host gives the award once; every device that hears it agrees; +1 point', () => {
-    const r = room(3);
-    r.start();
-    for (let k = 1; k <= 3; k++) r.turn(k);
-    expect(awardGame(r.devices[0], 2)).toBeNull(); // not before the reveal
-    r.play(0, revealGame(r.devices[0], 1));
-    expect(awardGame(r.devices[1], 2)).toBeNull(); // players can't award
-    const out = r.play(0, awardGame(r.devices[0], 2));
-    expect(r.devices.map((d) => d.game?.award)).toEqual([2, 2, 2]);
-    expect(awardGame(r.devices[0], 3)).toBeNull(); // only once
-    expect(receive(r.devices[1], hear(out.bytes), 0).event.type).toBe('duplicate');
-    const bo = scores(r.devices[2].game!).find((x) => x.name === 'Bo')!;
-    expect(bo.notes).toContain('Worst Connection award');
-  });
-
-  it('an award for another game is ignored', () => {
-    const r = room(2);
-    r.start();
-    r.turn(1);
-    r.turn(2);
-    r.play(0, revealGame(r.devices[0], 1));
-    const res = receive(r.devices[1], hear(encodePacket({ type: 'award', gameId: 999, step: 1 })), 0);
-    expect(res.event.type).toBe('other-game');
-    expect(res.state.game?.award).toBeNull();
+  it('drawings survive storage exactly', () => {
+    fc.assert(
+      fc.property(gridArb, (g) => {
+        if (!g.some((row) => row.some(Boolean))) return;
+        const r = room(2);
+        r.start();
+        const out = sendEntry(setWordDraft(r.devices[0], { custom: 'cat' }), { drawing: g })!;
+        const store = memoryStore();
+        saveState(store, out.state);
+        expect(loadState(store).game!.entries['1'].drawing).toEqual(g);
+      }),
+    );
   });
 });

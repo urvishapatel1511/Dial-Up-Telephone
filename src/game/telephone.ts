@@ -8,18 +8,23 @@ import {
   packetKey,
   PLAYERS_MAX,
   PLAYERS_MIN,
+  ROUNDS_MAX,
+  type FinalGuess,
+  type GameMode,
   type NoiseLevel,
   type Packet,
 } from '../protocol/packet';
+import { offsetFor, seatAt, stepOf } from './match';
 import { noisyDrawing, noisyText } from './noise';
+import { suggestWord } from './words';
 
 /**
  * Dial-Up Telephone game state for ONE player (one browser tab). Pure: no DOM,
- * no audio. Every device hears every chirp; this module decides what each
- * device is allowed to show.
+ * no audio. Every device hears every chirp and stores the round; this module
+ * decides what each device is allowed to show, and what it can resend.
  */
 
-const SEEN_LIMIT = 64;
+const SEEN_LIMIT = 96;
 const RETIRED_LIMIT = 32;
 
 export type Mode = 'host' | 'player';
@@ -27,7 +32,7 @@ export type Mode = 'host' | 'player';
 export interface Profile {
   name: string;
   mode: Mode | null;
-  /** 1 for the host, 2..8 for players. */
+  /** Fixed seat at the table: 1 for the host, 2..8 for players. */
   seat: number | null;
 }
 
@@ -38,21 +43,48 @@ export interface Entry {
   text?: string;
 }
 
+export interface Results {
+  funniest: number;
+  recognizable: number;
+  recovery: number;
+  final: FinalGuess;
+}
+
 export interface Game {
   gameId: number;
   players: number;
   host: string;
   seat: number;
   noise: NoiseLevel;
-  /** Known to the host from the start, to everyone else at the reveal. */
+  mode: GameMode;
+  matchId: number;
+  round: number;
+  category: number;
+  offset: number;
+  /** The secret word: chosen by the first drawer, carried by step 1, shown to others only at the reveal. */
   word: string | null;
-  /** By step ("1".."8"). Entries heard or sent by this device. */
+  /** The first drawer's word choice before sending (local only). */
+  wordDraft: { variant: number; custom: string };
   entries: Record<string, Entry>;
   revealed: boolean;
-  /** Step of the Worst Connection winner. */
-  award: number | null;
+  results: Results | null;
+  /** Name of another device that sent an entry for this device's step. */
+  conflict: string | null;
   startedAt: number;
   revealedAt: number | null;
+}
+
+export interface RoundSummary {
+  round: number;
+  gameId: number;
+  names: Record<string, string>;
+  points: Record<string, number>;
+}
+
+export interface Match {
+  matchId: number;
+  players: number;
+  rounds: RoundSummary[];
 }
 
 export interface Stats {
@@ -63,9 +95,10 @@ export interface Stats {
 }
 
 export interface State {
-  v: 2;
+  v: 3;
   profile: Profile;
   game: Game | null;
+  match: Match | null;
   seen: string[];
   sent: string[];
   retired: number[];
@@ -74,15 +107,17 @@ export interface State {
   stats: Stats;
 }
 
-export type Phase = 'lobby' | 'host-setup' | 'ready' | 'my-turn' | 'waiting' | 'sent' | 'ready-to-reveal' | 'reveal';
+export type Phase = 'lobby' | 'host-setup' | 'ready' | 'my-turn' | 'waiting' | 'sent' | 'missing' | 'ready-to-reveal' | 'reveal';
 
 export type ReceiveEvent =
-  | { type: 'joined'; host: string; players: number; seat: number; noise: NoiseLevel }
+  | { type: 'joined'; host: string; players: number; seat: number; noise: NoiseLevel; mode: GameMode; round: number }
   | { type: 'not-ready'; host: string }
   | { type: 'seat-too-high'; host: string; players: number }
-  | { type: 'entry'; step: number; name: string; forMe: boolean; last: boolean }
+  | { type: 'entry'; step: number; name: string; forMe: boolean; last: boolean; recovered: boolean }
+  | { type: 'conflict'; name: string }
   | { type: 'revealed' }
-  | { type: 'awarded'; step: number; name: string }
+  | { type: 'results' }
+  | { type: 'need'; step: number }
   | { type: 'other-game' }
   | { type: 'stale' }
   | { type: 'duplicate' }
@@ -92,14 +127,38 @@ export type ReceiveEvent =
 const emptyStats = (): Stats => ({ chirpsSent: 0, chirpsHeard: 0, bytesSent: 0, airtimeMs: 0 });
 
 export function initialState(): State {
-  return { v: 2, profile: { name: '', mode: null, seat: null }, game: null, seen: [], sent: [], retired: [], lastSent: null, stats: emptyStats() };
+  return { v: 3, profile: { name: '', mode: null, seat: null }, game: null, match: null, seen: [], sent: [], retired: [], lastSent: null, stats: emptyStats() };
 }
 
 function pushLimited<T>(list: T[], item: T, limit: number): T[] {
   return [...list.filter((x) => x !== item), item].slice(-limit);
 }
 
-const entryAt = (g: Game, step: number): Entry | undefined => g.entries[String(step)];
+export const entryAt = (g: Game, step: number): Entry | undefined => g.entries[String(step)];
+/** This device's step in the current round. */
+export const myStep = (g: Game) => stepOf(g.seat, g.players, g.offset);
+export const seatOfStep = (g: Game, step: number) => seatAt(step, g.players, g.offset);
+
+/** Steps this device has not heard. */
+export function missingSteps(g: Game): number[] {
+  return Array.from({ length: g.players }, (_, i) => i + 1).filter((k) => !entryAt(g, k));
+}
+
+/** Steps this device knows it missed: a later step was heard, or the round was revealed. */
+export function knownMissed(g: Game): number[] {
+  if (g.revealed) return missingSteps(g);
+  let last = 0;
+  for (let k = 1; k <= g.players; k++) if (entryAt(g, k)) last = k;
+  return missingSteps(g).filter((k) => k < last);
+}
+
+/** Name for a seat, if this device knows it. */
+export function nameOfSeat(g: Game, seat: number, myName: string): string | null {
+  if (seat === g.seat) return myName;
+  const e = entryAt(g, stepOf(seat, g.players, g.offset));
+  if (e) return e.name;
+  return seat === 1 ? g.host : null;
+}
 
 export function phaseOf(s: State): Phase {
   const g = s.game;
@@ -109,8 +168,9 @@ export function phaseOf(s: State): Phase {
     return 'lobby';
   }
   if (g.revealed) return 'reveal';
-  if (!entryAt(g, g.seat)) return g.seat === 1 || entryAt(g, g.seat - 1) ? 'my-turn' : 'waiting';
-  if (g.seat === 1 && entryAt(g, g.players)) return 'ready-to-reveal';
+  const me = myStep(g);
+  if (!entryAt(g, me)) return me === 1 || entryAt(g, me - 1) ? 'my-turn' : 'waiting';
+  if (g.seat === 1 && entryAt(g, g.players)) return missingSteps(g).length ? 'missing' : 'ready-to-reveal';
   return 'sent';
 }
 
@@ -120,92 +180,163 @@ export function currentStep(g: Game): number | null {
   return null;
 }
 
+// ---- the secret word (first drawer) -------------------------------------------
+
+export function chosenWord(g: Game): string | null {
+  const custom = g.wordDraft.custom;
+  return custom.trim() ? cleanText(custom) : suggestWord(g.category, g.gameId, g.wordDraft.variant);
+}
+
+export function setWordDraft(s: State, draft: Partial<Game['wordDraft']>): State {
+  if (!s.game) return s;
+  return { ...s, game: { ...s.game, wordDraft: { ...s.game.wordDraft, ...draft } } };
+}
+
+// ---- static -------------------------------------------------------------------
+
 export interface Arrived {
   drawing?: Grid;
   text?: string;
   /** Flipped cell indices (drawings). */
   flipped: number[];
-  /** Changed character indices (guesses). */
+  /** Changed character indices (guesses of unchanged length). */
   changed: number[];
+  /** True if static changed anything. */
+  altered: boolean;
 }
 
 /** An entry as it arrived at the next seat, after line static. Deterministic. */
 export function arrivedEntry(g: Game, e: Entry): Arrived {
   if (e.drawing) {
     const r = noisyDrawing(e.drawing, g.gameId, e.step, g.noise);
-    return { drawing: r.grid, flipped: r.flipped, changed: [] };
+    return { drawing: r.grid, flipped: r.flipped, changed: [], altered: r.flipped.length > 0 };
   }
   const r = noisyText(e.text ?? '', g.gameId, e.step, g.noise);
-  return { text: r.text, flipped: [], changed: r.changed };
+  return { text: r.text, flipped: [], changed: r.changed, altered: r.text !== e.text };
 }
 
-/** What this player must respond to on their turn: the word (seat 1) or the previous entry, with static. */
-export function promptFor(
-  g: Game,
-): { kind: 'word'; text: string } | { kind: 'drawing'; drawing: Grid; from: string } | { kind: 'text'; text: string; from: string } | null {
-  if (g.seat === 1) return g.word ? { kind: 'word', text: g.word } : null;
-  const prev = entryAt(g, g.seat - 1);
+export type Prompt =
+  | { kind: 'word'; text: string }
+  | { kind: 'drawing'; drawing: Grid; from: string; altered: boolean }
+  | { kind: 'text'; text: string; from: string; altered: boolean };
+
+/** What this player responds to on their turn: their own word (step 1) or the previous entry as it arrived. */
+export function promptFor(g: Game): Prompt | null {
+  const me = myStep(g);
+  if (me === 1) return { kind: 'word', text: g.word ?? chosenWord(g) ?? '' };
+  const prev = entryAt(g, me - 1);
   if (!prev) return null;
   const a = arrivedEntry(g, prev);
-  if (a.drawing) return { kind: 'drawing', drawing: a.drawing, from: prev.name };
-  return { kind: 'text', text: a.text ?? '', from: prev.name };
+  if (a.drawing) return { kind: 'drawing', drawing: a.drawing, from: prev.name, altered: a.altered };
+  return { kind: 'text', text: a.text ?? '', from: prev.name, altered: a.altered };
+}
+
+/** The text clue the author of `step` was given (the word for step 1, else the previous guess after static). */
+export function clueFor(g: Game, step: number): string | null {
+  if (step === 1) return g.word;
+  const prev = entryAt(g, step - 1);
+  if (!prev?.text) return null;
+  return arrivedEntry(g, prev).text ?? null;
+}
+
+// ---- receiving ----------------------------------------------------------------
+
+function newGameFrom(p: Extract<Packet, { type: 'start' }>, seat: number, now: number): Game {
+  return {
+    gameId: p.gameId,
+    players: p.players,
+    host: p.name,
+    seat,
+    noise: p.noise,
+    mode: p.mode,
+    matchId: p.matchId,
+    round: p.round,
+    category: p.category,
+    offset: offsetFor(p.round, p.players),
+    word: null,
+    wordDraft: { variant: 0, custom: '' },
+    entries: {},
+    revealed: false,
+    results: null,
+    conflict: null,
+    startedAt: now,
+    revealedAt: null,
+  };
+}
+
+/** Add a finished (or abandoned) round of a match to the match record, once. */
+function archive(match: Match | null, g: Game | null): Match | null {
+  if (!g || g.mode !== 'match') return match;
+  const m = match && match.matchId === g.matchId ? match : { matchId: g.matchId, players: g.players, rounds: [] };
+  if (m.rounds.some((r) => r.gameId === g.gameId)) return m;
+  return { ...m, rounds: [...m.rounds, summarize(g)] };
 }
 
 /** Pure: apply a decoded packet. Anything not accepted returns the same state object. */
 export function receive(s: State, p: Packet, now: number): { state: State; event: ReceiveEvent } {
   const key = packetKey(p);
   if (s.sent.includes(key)) return { state: s, event: { type: 'own-echo' } };
-  if (s.seen.includes(key)) return { state: s, event: { type: 'duplicate' } };
   if (s.retired.includes(p.gameId)) return { state: s, event: { type: 'stale' } };
+  const g = s.game;
+
+  // Requests are never remembered as "seen": the same hop can be asked for again.
+  if (p.type === 'need') {
+    if (!g || g.gameId !== p.gameId) return { state: s, event: { type: 'other-game' } };
+    return { state: s, event: { type: 'need', step: p.step } };
+  }
+
+  if (s.seen.includes(key)) return { state: s, event: { type: 'duplicate' } };
   const accept = (next: State, event: ReceiveEvent) => ({
     state: { ...next, seen: pushLimited(next.seen, key, SEEN_LIMIT), stats: { ...next.stats, chirpsHeard: next.stats.chirpsHeard + 1 } },
     event,
   });
-  const g = s.game;
 
   if (p.type === 'start') {
-    if (g && !g.revealed) return { state: s, event: { type: g.gameId === p.gameId ? 'ignored' : 'other-game' } };
+    const nextOfMatch = !!g && p.mode === 'match' && g.mode === 'match' && g.matchId === p.matchId && p.round > g.round;
+    if (g && !g.revealed && !nextOfMatch) return { state: s, event: { type: g.gameId === p.gameId ? 'ignored' : 'other-game' } };
     const { mode, seat, name } = s.profile;
-    // Not added to the dedupe memory: after fixing their seat, a Resend can still let them join.
+    // Not remembered as seen: after fixing their seat, a resend can still let them join.
     if (mode !== 'player' || !seat || !cleanName(name)) return { state: s, event: { type: 'not-ready', host: p.name } };
     if (seat > p.players) return { state: s, event: { type: 'seat-too-high', host: p.name, players: p.players } };
+    let match = p.mode === 'match' ? archive(s.match, g) : null;
+    if (p.mode === 'match' && (!match || match.matchId !== p.matchId)) match = { matchId: p.matchId, players: p.players, rounds: [] };
     const retired = g ? pushLimited(s.retired, g.gameId, RETIRED_LIMIT) : s.retired;
-    const game: Game = {
-      gameId: p.gameId,
-      players: p.players,
-      host: p.name,
-      seat,
-      noise: p.noise,
-      word: null,
-      entries: {},
-      revealed: false,
-      award: null,
-      startedAt: now,
-      revealedAt: null,
-    };
-    return accept({ ...s, retired, game, lastSent: null }, { type: 'joined', host: p.name, players: p.players, seat, noise: p.noise });
+    return accept(
+      { ...s, retired, match, game: newGameFrom(p, seat, now), lastSent: null },
+      { type: 'joined', host: p.name, players: p.players, seat, noise: p.noise, mode: p.mode, round: p.round },
+    );
   }
 
   if (!g || g.gameId !== p.gameId) return { state: s, event: { type: 'other-game' } };
 
-  if (p.type === 'award') {
-    const e = entryAt(g, p.step);
-    if (!g.revealed || g.award !== null || p.step > g.players) return { state: s, event: { type: 'ignored' } };
-    return accept({ ...s, game: { ...g, award: p.step } }, { type: 'awarded', step: p.step, name: e?.name ?? `Seat ${p.step}` });
-  }
-
-  if (g.revealed) return { state: s, event: { type: 'ignored' } };
-
   if (p.type === 'entry') {
+    // Fill gaps, before or after the reveal; never overwrite an accepted entry.
     if (p.step > g.players || entryAt(g, p.step)) return { state: s, event: { type: 'ignored' } };
     const entry: Entry = 'drawing' in p ? { step: p.step, name: p.name, drawing: p.drawing } : { step: p.step, name: p.name, text: p.text };
-    const game = { ...g, entries: { ...g.entries, [String(p.step)]: entry } };
-    return accept({ ...s, game }, { type: 'entry', step: p.step, name: p.name, forMe: p.step === g.seat - 1, last: p.step === g.players });
+    const mine = p.step === myStep(g);
+    const myName = cleanName(s.profile.name) ?? '';
+    const conflict = mine && p.name !== myName ? p.name : g.conflict;
+    const word = p.step === 1 && 'drawing' in p && p.word ? p.word : g.word;
+    const game: Game = { ...g, word, conflict, entries: { ...g.entries, [String(p.step)]: entry } };
+    if (mine && p.name !== myName) return accept({ ...s, game }, { type: 'conflict', name: p.name });
+    return accept(
+      { ...s, game },
+      { type: 'entry', step: p.step, name: p.name, forMe: p.step === myStep(g) - 1, last: p.step === g.players, recovered: g.revealed },
+    );
   }
 
-  // reveal
-  return accept({ ...s, game: { ...g, word: p.word, revealed: true, revealedAt: now } }, { type: 'revealed' });
+  if (p.type === 'reveal') {
+    if (g.revealed) return { state: s, event: { type: 'ignored' } };
+    return accept({ ...s, game: { ...g, revealed: true, revealedAt: now } }, { type: 'revealed' });
+  }
+
+  // results (also implies the reveal, for devices that missed it)
+  if (g.results) return { state: s, event: { type: 'ignored' } };
+  const results: Results = { funniest: p.funniest, recognizable: p.recognizable, recovery: p.recovery, final: p.final };
+  return accept({ ...s, game: { ...g, results, revealed: true, revealedAt: g.revealedAt ?? now } }, { type: 'results' });
 }
+
+// ---- sending --------------------------------------------------------------------
 
 export interface Outgoing {
   /** Commit only after the chirp has played. */
@@ -214,7 +345,8 @@ export interface Outgoing {
   bytes: Uint8Array;
 }
 
-function recordSend(s: State, packet: Packet): Outgoing {
+/** Record a chirp to play. Exported so recovery replies can be played one by one. */
+export function outgoingFor(s: State, packet: Packet): Outgoing {
   const bytes = encodePacket(packet);
   return { packet, bytes, state: { ...s, sent: pushLimited(s.sent, packetKey(packet), SEEN_LIMIT), lastSent: Array.from(bytes) } };
 }
@@ -223,77 +355,177 @@ export function setProfile(s: State, profile: Partial<Profile>): State {
   return { ...s, profile: { ...s.profile, ...profile } };
 }
 
-/** Host: start a new game. The host is always seat 1. */
-export function startGame(s: State, opts: { players: number; word: string; gameId: number; now: number; noise?: NoiseLevel }): Outgoing | null {
-  const name = cleanName(s.profile.name);
-  const word = cleanText(opts.word);
-  const noise = opts.noise ?? 0;
-  if (!name || !word || opts.players < PLAYERS_MIN || opts.players > PLAYERS_MAX) return null;
-  if (s.game && !s.game.revealed) return null;
-  let gameId = opts.gameId & 0xffff;
+/** The packet for a stored entry: byte-identical to the one first sent. */
+export function entryPacket(g: Game, e: Entry): Packet {
+  if (e.drawing) {
+    return e.step === 1
+      ? { type: 'entry', gameId: g.gameId, step: 1, name: e.name, drawing: e.drawing, word: g.word ?? '' }
+      : { type: 'entry', gameId: g.gameId, step: e.step, name: e.name, drawing: e.drawing };
+  }
+  return { type: 'entry', gameId: g.gameId, step: e.step, name: e.name, text: e.text ?? '' };
+}
+
+export const startPacketOf = (g: Game): Packet => ({
+  type: 'start',
+  gameId: g.gameId,
+  players: g.players,
+  name: g.host,
+  noise: g.noise,
+  mode: g.mode,
+  matchId: g.matchId,
+  round: g.round,
+  category: g.category,
+});
+
+function freshId(s: State, id: number): number {
+  let gameId = id & 0xffff;
   while (s.retired.includes(gameId) || s.game?.gameId === gameId) gameId = (gameId + 1) & 0xffff;
+  return gameId;
+}
+
+export interface StartOptions {
+  players: number;
+  gameId: number;
+  now: number;
+  noise?: NoiseLevel;
+  mode?: GameMode;
+  category?: number;
+}
+
+/** Host: start a Quick Round or round 1 of a Party Match. The host is always seat 1. */
+export function startGame(s: State, opts: StartOptions): Outgoing | null {
+  const name = cleanName(s.profile.name);
+  if (!name || opts.players < PLAYERS_MIN || opts.players > PLAYERS_MAX) return null;
+  if (s.game && !s.game.revealed) return null;
+  const gameId = freshId(s, opts.gameId);
+  const mode = opts.mode ?? 'quick';
+  const p = { type: 'start' as const, gameId, players: opts.players, name, noise: opts.noise ?? 0, mode, matchId: gameId, round: 1, category: opts.category ?? 0 };
   const retired = s.game ? pushLimited(s.retired, s.game.gameId, RETIRED_LIMIT) : s.retired;
-  const game: Game = {
-    gameId,
-    players: opts.players,
-    host: name,
-    seat: 1,
-    noise,
-    word,
-    entries: {},
-    revealed: false,
-    award: null,
-    startedAt: opts.now,
-    revealedAt: null,
-  };
-  return recordSend(
-    { ...s, retired, profile: { ...s.profile, name, mode: 'host', seat: 1 }, game, stats: emptyStats() },
-    { type: 'start', gameId, players: opts.players, name, noise },
+  const game = { ...newGameFrom(p, 1, opts.now) };
+  const match = mode === 'match' ? { matchId: gameId, players: opts.players, rounds: [] } : null;
+  return outgoingFor({ ...s, retired, match, profile: { ...s.profile, name, mode: 'host', seat: 1 }, game, stats: emptyStats() }, p);
+}
+
+/** Host: start the next round of the current Party Match (same players, line, and category). */
+export function nextRound(s: State, gameId: number, now: number): Outgoing | null {
+  const g = s.game;
+  if (!g || g.seat !== 1 || g.mode !== 'match' || !g.revealed || g.round >= ROUNDS_MAX) return null;
+  const id = freshId(s, gameId);
+  const p = { ...(startPacketOf(g) as Extract<Packet, { type: 'start' }>), gameId: id, round: g.round + 1 };
+  return outgoingFor(
+    { ...s, match: archive(s.match, g), retired: pushLimited(s.retired, g.gameId, RETIRED_LIMIT), game: newGameFrom(p, 1, now), stats: emptyStats() },
+    p,
   );
 }
 
-/** Send this player's entry: a 16×16 drawing on odd seats, a guess on even seats. */
+/** Send this player's entry: a drawing on odd steps (step 1 also carries the chosen word), a guess on even steps. */
 export function sendEntry(s: State, content: { drawing?: Grid; text?: string }): Outgoing | null {
   const g = s.game;
   if (!g || phaseOf(s) !== 'my-turn') return null;
-  const step = g.seat;
+  const step = myStep(g);
   const name = cleanName(s.profile.name);
   if (!name) return null;
-  let packet: Packet;
   let entry: Entry;
+  let word = g.word;
   if (isDrawingStep(step)) {
     const d = content.drawing;
     if (!d || d.length !== DRAW_SIZE || !d.some((r) => r.some(Boolean))) return null;
-    const drawing = d.map((r) => [...r]);
-    packet = { type: 'entry', gameId: g.gameId, step, name, drawing };
-    entry = { step, name, drawing };
+    if (step === 1) {
+      word = chosenWord(g);
+      if (!word) return null;
+    }
+    entry = { step, name, drawing: d.map((r) => [...r]) };
   } else {
     const text = cleanText(content.text ?? '');
     if (!text) return null;
-    packet = { type: 'entry', gameId: g.gameId, step, name, text };
     entry = { step, name, text };
   }
-  return recordSend({ ...s, game: { ...g, entries: { ...g.entries, [String(step)]: entry } } }, packet);
+  const game: Game = { ...g, word, entries: { ...g.entries, [String(step)]: entry } };
+  return outgoingFor({ ...s, game }, entryPacket(game, entry));
 }
 
-/** Host: reveal the chain once the last step has been heard. */
-export function revealGame(s: State, now: number): Outgoing | null {
+/** Host: reveal. A normal reveal needs every step; `force` is the labelled fallback with missing hops. */
+export function revealGame(s: State, now: number, force = false): Outgoing | null {
   const g = s.game;
-  if (!g || g.seat !== 1 || !g.word || phaseOf(s) !== 'ready-to-reveal') return null;
-  return recordSend({ ...s, game: { ...g, revealed: true, revealedAt: now } }, { type: 'reveal', gameId: g.gameId, players: g.players, word: g.word });
+  const phase = phaseOf(s);
+  if (!g || g.seat !== 1 || !(phase === 'ready-to-reveal' || (force && phase === 'missing'))) return null;
+  return outgoingFor({ ...s, game: { ...g, revealed: true, revealedAt: now } }, { type: 'reveal', gameId: g.gameId, players: g.players });
 }
 
-/** Host: give the Worst Connection award to one hop, once per round. */
-export function awardGame(s: State, step: number): Outgoing | null {
+/** Which hops may receive each award. */
+export function awardOptions(g: Game): { funniest: number[]; recognizable: number[]; recovery: number[]; finalGuess: boolean } {
+  const present = Array.from({ length: g.players }, (_, i) => i + 1).filter((k) => entryAt(g, k));
+  return {
+    funniest: present.filter((k) => k >= 2),
+    recognizable: present.filter((k) => isDrawingStep(k)),
+    recovery: present.filter((k) => {
+      const prev = k >= 2 ? entryAt(g, k - 1) : undefined;
+      return !!prev && arrivedEntry(g, prev).altered;
+    }),
+    finalGuess: g.players % 2 === 1 && !!entryAt(g, g.players),
+  };
+}
+
+/** Host: record the out-loud votes (and the room's final guess) in one chirp. Once per round. */
+export function sendResults(s: State, r: Results): Outgoing | null {
   const g = s.game;
-  if (!g || g.seat !== 1 || !g.revealed || g.award !== null || !entryAt(g, step)) return null;
-  return recordSend({ ...s, game: { ...g, award: step } }, { type: 'award', gameId: g.gameId, step });
+  if (!g || g.seat !== 1 || !g.revealed || g.results) return null;
+  const o = awardOptions(g);
+  const ok = (v: number, list: number[]) => v === 0 || list.includes(v);
+  if (!ok(r.funniest, o.funniest) || !ok(r.recognizable, o.recognizable) || !ok(r.recovery, o.recovery)) return null;
+  if (r.final !== 0 && !o.finalGuess) return null;
+  return outgoingFor({ ...s, game: { ...g, results: { ...r } } }, { type: 'results', gameId: g.gameId, ...r });
 }
 
-/** Leave the current game (or finish after a reveal). Players stay ready for the next start. */
-export function leaveGame(s: State): State {
-  const retired = s.game ? pushLimited(s.retired, s.game.gameId, RETIRED_LIMIT) : s.retired;
-  return { ...s, game: null, retired, lastSent: null, stats: emptyStats() };
+/** Ask the room for a missed hop (0 = the reveal and results). */
+export function askFor(s: State, step: number): Outgoing | null {
+  const g = s.game;
+  if (!g || step < 0 || step > g.players || (step > 0 && entryAt(g, step))) return null;
+  return outgoingFor(s, { type: 'need', gameId: g.gameId, step });
+}
+
+/**
+ * Automatic answer to a request. Only ONE device answers each request: the
+ * author of the step, or the host for step 0. Others may relay by hand.
+ */
+export function autoAnswer(s: State, step: number): Packet[] {
+  const g = s.game;
+  if (!g) return [];
+  if (step === 0) {
+    if (g.seat !== 1 || !g.revealed) return [];
+    const out: Packet[] = [{ type: 'reveal', gameId: g.gameId, players: g.players }];
+    if (g.results) out.push({ type: 'results', gameId: g.gameId, ...g.results });
+    return out;
+  }
+  const e = entryAt(g, step);
+  return myStep(g) === step && e ? [entryPacket(g, e)] : [];
+}
+
+/** True if this device holds a hop that someone asked for, but is not its author (manual relay). */
+export function canRelay(s: State, step: number): boolean {
+  const g = s.game;
+  return !!g && step >= 1 && myStep(g) !== step && !!entryAt(g, step);
+}
+
+/** Resend any held entry, byte-identical. */
+export function resendEntry(s: State, step: number): Outgoing | null {
+  const g = s.game;
+  const e = g && entryAt(g, step);
+  return g && e ? outgoingFor(s, entryPacket(g, e)) : null;
+}
+
+/** Host: resend the start signal for late joiners. */
+export function resendStart(s: State): Outgoing | null {
+  const g = s.game;
+  return g && g.seat === 1 ? outgoingFor(s, startPacketOf(g)) : null;
+}
+
+/** Leave the round. In a match, the round is kept in the totals unless the match ends. */
+export function leaveGame(s: State, endMatch = false): State {
+  const g = s.game;
+  const retired = g ? pushLimited(s.retired, g.gameId, RETIRED_LIMIT) : s.retired;
+  const match = endMatch || g?.mode !== 'match' ? null : archive(s.match, g);
+  return { ...s, game: null, match, retired, lastSent: null, stats: emptyStats() };
 }
 
 export function resendBytes(s: State): Uint8Array | null {
@@ -336,26 +568,30 @@ export function close(a: string, b: string): boolean {
 
 export interface ChainCard {
   step: number;
+  seat: number;
   kind: 'word' | 'drawing' | 'text' | 'missing';
   name: string;
   text?: string;
   drawing?: Grid;
+  /** The text clue this author was given (for drawings), after static. */
+  clue: string | null;
   /** How static changed this entry on its way to the next seat (null if unchanged or the last hop). */
   arrived: Arrived | null;
 }
 
 export function chain(g: Game): { cards: ChainCard[]; perfect: boolean | null; survivedHops: number } {
-  const cards: ChainCard[] = [{ step: 0, kind: 'word', name: g.host, text: g.word ?? '?', arrived: null }];
+  const cards: ChainCard[] = [{ step: 0, seat: seatOfStep(g, 1), kind: 'word', name: entryAt(g, 1)?.name ?? `Seat ${seatOfStep(g, 1)}`, text: g.word ?? '?', clue: null, arrived: null }];
   for (let k = 1; k <= g.players; k++) {
     const e = entryAt(g, k);
+    const seat = seatOfStep(g, k);
     if (!e) {
-      cards.push({ step: k, kind: 'missing', name: `Seat ${k}`, arrived: null });
+      cards.push({ step: k, seat, kind: 'missing', name: `Seat ${seat}`, clue: null, arrived: null });
       continue;
     }
     const a = k < g.players ? arrivedEntry(g, e) : null;
-    const arrived = a && (a.flipped.length || a.changed.length) ? a : null;
-    if (e.drawing) cards.push({ step: k, kind: 'drawing', name: e.name, drawing: e.drawing, arrived });
-    else cards.push({ step: k, kind: 'text', name: e.name, text: e.text, arrived });
+    const arrived = a && a.altered ? a : null;
+    if (e.drawing) cards.push({ step: k, seat, kind: 'drawing', name: e.name, drawing: e.drawing, clue: clueFor(g, k), arrived });
+    else cards.push({ step: k, seat, kind: 'text', name: e.name, text: e.text, clue: null, arrived });
   }
   const word = g.word ?? '';
   const guesses = cards.filter((c) => c.kind === 'text');
@@ -373,15 +609,20 @@ export interface Score {
   notes: string[];
 }
 
-/** Drawer and guesser each score 1 when the guess matches what the drawer saw; +1 for the award. */
+/**
+ * Every seat has exactly one scoring chance per round: as drawer or guesser of
+ * a pair, or (odd player counts) as the last drawer judged by the room's
+ * out-loud guess. Awards are +1 each.
+ */
 export function scores(g: Game): Score[] {
   const table = new Map<number, Score>();
   for (let k = 1; k <= g.players; k++) {
-    const name = entryAt(g, k)?.name ?? (k === 1 ? g.host : null);
-    if (name) table.set(k, { seat: k, name, points: 0, notes: [] });
+    const seat = seatOfStep(g, k);
+    const name = entryAt(g, k)?.name ?? (seat === 1 ? g.host : null);
+    if (name) table.set(seat, { seat, name, points: 0, notes: [] });
   }
-  const add = (seat: number, note: string) => {
-    const s = table.get(seat);
+  const add = (step: number, note: string) => {
+    const s = table.get(seatOfStep(g, step));
     if (s) {
       s.points++;
       s.notes.push(note);
@@ -390,21 +631,63 @@ export function scores(g: Game): Score[] {
   for (let k = 1; k + 1 <= g.players; k += 2) {
     const drawing = entryAt(g, k);
     const guess = entryAt(g, k + 1);
-    if (!drawing || !guess?.text) continue;
-    const prev = k === 1 ? null : entryAt(g, k - 1);
-    const seen = k === 1 ? g.word : prev ? arrivedEntry(g, prev).text : undefined;
-    if (seen && close(guess.text, seen)) {
+    const seen = clueFor(g, k);
+    if (!drawing || !guess?.text || !seen) continue;
+    if (close(guess.text, seen)) {
       add(k, `${guess.name} guessed your drawing`);
       add(k + 1, `guessed ${drawing.name}'s drawing`);
     }
   }
-  if (g.award !== null) add(g.award, 'Worst Connection award');
+  const r = g.results;
+  if (r) {
+    if (r.final === 1) add(g.players, 'the room guessed your final drawing');
+    if (r.funniest) add(r.funniest, 'Funniest Transformation');
+    if (r.recognizable) add(r.recognizable, 'Most Recognizable Drawing');
+    if (r.recovery) add(r.recovery, 'Best Recovery');
+  }
   return [...table.values()].sort((a, b) => b.points - a.points || a.seat - b.seat);
+}
+
+export function summarize(g: Game): RoundSummary {
+  const names: Record<string, string> = {};
+  const points: Record<string, number> = {};
+  for (const s of scores(g)) {
+    names[String(s.seat)] = s.name;
+    points[String(s.seat)] = s.points;
+  }
+  return { round: g.round, gameId: g.gameId, names, points };
+}
+
+export interface Standing {
+  seat: number;
+  name: string;
+  points: number;
+}
+
+/** Party Match totals: archived rounds plus the current round. */
+export function matchStandings(s: State): { standings: Standing[]; rounds: number } {
+  const g = s.game;
+  const rounds = [...(s.match?.rounds ?? [])];
+  if (g && g.mode === 'match' && g.revealed && !rounds.some((r) => r.gameId === g.gameId)) rounds.push(summarize(g));
+  const table = new Map<number, Standing>();
+  for (const r of rounds) {
+    for (const [seat, pts] of Object.entries(r.points)) {
+      const n = Number(seat);
+      const cur = table.get(n) ?? { seat: n, name: r.names[seat], points: 0 };
+      table.set(n, { ...cur, name: r.names[seat] ?? cur.name, points: cur.points + pts });
+    }
+  }
+  return { standings: [...table.values()].sort((a, b) => b.points - a.points || a.seat - b.seat), rounds: rounds.length };
+}
+
+export function matchOver(s: State): boolean {
+  const g = s.game;
+  return !!g && g.mode === 'match' && g.round >= ROUNDS_MAX && g.revealed && !!g.results;
 }
 
 // ---- persistence (per tab) -------------------------------------------------
 
-export const STORAGE_KEY = 'dialup:v2';
+export const STORAGE_KEY = 'dialup:v3';
 
 export interface KeyValueStore {
   getItem(key: string): string | null;
@@ -416,7 +699,7 @@ export function loadState(store: KeyValueStore): State {
     const raw = store.getItem(STORAGE_KEY);
     if (!raw) return initialState();
     const p = JSON.parse(raw) as Partial<State>;
-    if (p.v !== 2 || !p.profile || !Array.isArray(p.seen) || !Array.isArray(p.sent)) return initialState();
+    if (p.v !== 3 || !p.profile || !Array.isArray(p.seen) || !Array.isArray(p.sent)) return initialState();
     return { ...initialState(), ...p } as State;
   } catch {
     return initialState();

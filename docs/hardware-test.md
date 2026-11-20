@@ -1,55 +1,79 @@
-# Real-device test: one round of Dial-Up Telephone
+# Real-device test: Quick Round and Party Match (v3)
 
 Nobody has run this test yet. Record what you see in `docs/hardware-log.md`. The automated ggwave test is *synthetic* (no speaker, no microphone), so only this checklist tests the real air path.
 
-You need **3 or more devices** (laptop + 2 phones is fine). With only two devices, play a 2-player round.
+You need **3 or more devices** (laptop + 2 phones is fine). With 3 devices you also test the odd-player room guess. With 4 you test the even case.
 
 ## A. Open the game
 
 **Published site (recommended, also tests offline):**
-1. Open `https://urvishapatel1511.github.io/Dial-Up-Telephone/` on every device while online. The new version must be pushed first; see `docs/publish.md`.
+1. Open `https://urvishapatel1511.github.io/Dial-Up-Telephone/` on every device while online. v3 must be pushed first; see `docs/publish.md`.
 2. On every device, tap **📦 Prepare for offline play** and wait for "✓ Ready". If it asks you to reload once, do that and tap Prepare again.
 3. Turn off Wi-Fi and Bluetooth everywhere, then reload. The game must still load.
 
 **Laptop test server (no offline mode):** run `npm.cmd run dev:https`. On the laptop open `https://localhost:5173/`; on the phones open the `Network:` address and accept the certificate warning.
 
-## B. Prepare
+Volume high everywhere. iPhone: silent mode off. Devices within about 1 m, in a circle, in seat order.
 
-- Volume high everywhere. iPhone: silent mode off. Devices within about 1 m, in a circle.
-
-## C. Play
+## B. Quick Round (Crackly line)
 
 | # | Who | Do | Expect |
 |---|---|---|---|
-| 1 | Players | Type a name → **Join a game** → seat 2, 3, … → **I'm ready**. Allow the mic | "● Listening for the next chirp" |
-| 2 | Host | Type a name → **Host a game** → set the player count → **Start** | Every player: "Connected! … You are seat N." The line appears |
-| 3 | Host | Draw the word, **Send my drawing** | Seat 2: "Your turn!", with the drawing. Others: "Heard Asha (seat 1). Now seat 2 is up." |
-| 4 | Seat 2 | Type a guess, send | Seat 3 sees only the guess. The line updates on every screen |
-| 5 | Everyone | Continue to the last seat | Host: "Gather around for the reveal!" |
-| 6 | Host | **Reveal the chain** → ▶ Play the show | Every phone shows the same chain and the same static (red squares, changed letters) |
-| 6b | Everyone | Vote out loud; the host taps 🏆 on a card | Every phone highlights that card, and the scores match |
-| 7 | Everyone | Players press **Ready for the next round**, then the host presses **Host the next round** → Start | A new round starts. An old chirp replayed is ignored |
+| 1 | Players | Name → **Join a game** → seats 2, 3, … → **I'm ready**. Allow the mic | "● Listening for the next chirp" |
+| 2 | Host | Name → **Host a game** → ⚡ Quick Round, player count, 📡 Crackly, a category → **Start** | The dial-up handshake, then the start chirp. Every player: "Connected! … You are seat N." The line appears |
+| 3 | Host (first drawer) | See the suggested word. Try 🎲 Another word, or type one. Draw with Pen/Eraser, Small/Large, Undo/Redo. **Send my drawing** | No handshake this time, only the data chirp. Host: "Played your drawing. It's confirmed when Bo's turn is heard." Seat 2: "Your turn!" |
+| 4 | Seat 2 | Guess, send | Host's line shows "✓ received" for hop 1. Seat 3 sees only the guess. If static changed it: "Draw whatever this makes you imagine—even if it's nonsense." |
+| 5 | Everyone | Continue to the last seat | Host: "Gather around for the reveal!" (odd count: the room guess box first) |
+| 6 | Host (odd count) | Show the last drawing to the room. Everyone guesses out loud. **Show me the answer** → ✓ or ✗ | The choice is pre-filled in the awards form |
+| 7 | Host | **Reveal the chain** → ▶ Play the show, then ⏸, ◀ Previous, Next ▶, Show all | Every phone shows the same chain, the same Sent/Arrived pairs, and the same captions |
+| 8 | Host | Vote out loud, pick the awards, **Chirp the awards to everyone** | Every phone shows the same awards and the same scores |
+| 9 | Players, then host | **Ready for the next round**, then **Host another round** | A new round. An old chirp replayed is ignored |
 
-## D. Extra checks
+## C. Party Match (Haunted line)
 
-- **Missed chirp:** cover one phone's mic while the previous player sends. Its screen says who to ask. That player presses **Resend**, and the turn arrives once.
-- **Seat too high:** a player picks seat 6 in a 4-player game. They're told to pick a lower seat. After fixing it, the host's **Resend** lets them join.
-- **Refresh** a phone mid-round. It resumes and offers **Resume listening**.
+| # | Who | Do | Expect |
+|---|---|---|---|
+| 1 | Host | 🏆 Party Match → Start | Players see "round 1 of 3 of a Party Match" |
+| 2 | Everyone | Play round 1, reveal, send the awards | "Party Match totals after round 1 of 3" on every phone |
+| 3 | Host | **Start round 2 of 3** | Players join automatically (no button). **Seat 2 now draws first** and picks the word |
+| 4 | One player | Refresh the page in the middle of round 2, then Resume listening | The round and the match totals are still there |
+| 5 | Everyone | Finish rounds 2 and 3 | After round 3's awards: "🏆 NAME wins the Party Match" and the same final totals on every phone |
+
+## D. Recovery checks (do these during any round)
+
+- **Missed hop, before the reveal:** cover seat 3's mic while seat 1 sends. After seat 2 plays, seat 3's line shows "⚠ missed here" for hop 1. Seat 3 taps **📣 Ask for it by sound**. Only seat 1's phone answers, about 1 s later. Other phones that hold the hop show "Send it for them (only if Asha doesn't answer)" and stay quiet.
+- **Host missing a hop:** cover the host's mic for one turn. At the end, the host sees "Some hops didn't reach this phone" with no Reveal button. Asking by sound fills it in, and Reveal appears.
+- **Missed hop, after the reveal:** cover a player's mic for one turn, finish, reveal. That player's chain shows "Not heard on this phone". Ask for it by sound: the hop appears, and nothing else changes.
+- **Missed reveal or awards:** cover a player's mic during Reveal. Tap **Ask for the reveal**. The host's phone answers.
+- **Same seat twice:** two players pick seat 2. The second one sees "⚠ … also sent the turn for your seat".
+- **Seat too high:** a player picks seat 6 in a 4-player game. They're told to pick a lower seat. After fixing it, the host's **↻ Resend the start signal** lets them join.
+- **Effects off** (⚙ Settings): no handshake at all, and chirps still play.
 - **Secrecy:** while waiting, no phone shows the secret word or anyone else's entry.
-- **Effects off** (⚙ Settings): no dial-up handshake, and chirps still play. Compare how often drawing chirps are missed with effects on and off.
-- **Line quality:** play one round Crackly and one Haunted. Which was funnier?
 
 ## E. Measure
 
-- Chirp seconds (shown after each send, also in Settings → Diagnostics).
+- Chirp seconds (shown after each send, also in Settings → Diagnostics). Synthetic values for reference: first drawing 4.3 s, other drawings 3.6 s, guesses ≤ 2.3 s, requests 1.3 s, handshake about 1.5 s (start only).
 - Chirps needed per turn, in a quiet room and with people talking.
-- Round length with first-time players, and whether people laughed at the reveal.
+- Round length and match length with first-time players.
+
+## F. Group playtest checklist
+
+Fill one row per session in `docs/hardware-log.md`.
+
+| Question | How to measure |
+|---|---|
+| **Setup time** | Minutes from "everyone opens the page" to the first start chirp heard by all |
+| **Waiting** | Did anyone ask "is it my turn?" or look bored? Note the longest wait between turns |
+| **Drawing usability** | Did people use Undo, Eraser, Large brush, Bigger canvas? Any accidental clears or mis-taps? |
+| **Funny moments** | Write down the best mutation (e.g. "CAT → BAT → bat with a cape") and when people laughed: during play, at the reveal, at the awards |
+| **Recovery** | How many times was Ask for it by sound used? Did it work first time? |
+| **Willingness to replay** | After the round or match, ask "another one?" Count yes / no |
 
 ## If it fails
 
 | Symptom | Try |
 |---|---|
-| Nothing heard | Volume up, move closer, ask the sender to Resend. iPhone silent switch |
-| "garbled chirp" | Resend |
+| Nothing heard | Volume up, move closer, tap Ask for it by sound. iPhone silent switch |
+| "couldn't read it" | A sound problem, not static: ask for it by sound |
 | "Audio didn't start" | Try again, or reload |
 | Mic never asks | The page must be https:// |

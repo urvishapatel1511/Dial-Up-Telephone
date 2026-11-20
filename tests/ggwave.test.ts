@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { concatSamples, handshakeSamples } from '../src/audio/handshake';
+import { concatSamples, handshakeSamples, wantsHandshake } from '../src/audio/handshake';
 import { Modem } from '../src/audio/modem';
 import type { GgwaveFactory } from '../src/audio/ggwave-types';
 import { emptyGrid } from '../src/protocol/drawing';
@@ -40,15 +40,38 @@ describe('ggwave pipeline in Node (synthetic waveform, no air path)', () => {
     rx = await Modem.create(factory, SAMPLE_RATE);
   });
 
-  it('a 16×16 drawing packet (46 bytes) survives encode -> waveform -> decode byte-for-byte', () => {
-    const bytes = encodePacket({ type: 'entry', gameId: 0xff80, step: 7, name: 'ABCDEFG', drawing: drawing() });
-    expect(bytes.length).toBe(46);
+  it('the largest packet (58 bytes: first drawing + secret word) survives encode -> waveform -> decode', () => {
+    const bytes = encodePacket({ type: 'entry', gameId: 0xff80, step: 1, name: 'ABCDEFG', drawing: drawing(), word: 'ABCDEFGHIJKL' });
+    expect(bytes.length).toBe(58);
     const samples = tx.encode(bytes);
-    console.log(`46-byte drawing chirp: ${tx.durationMs(samples)} ms (synthetic; measure on hardware too)`);
+    console.log(`58-byte first-drawing chirp: ${tx.durationMs(samples)} ms (synthetic; measure on hardware too)`);
     const decoded = receiveOverWire(rx, samples);
     expect(decoded && Array.from(decoded)).toEqual(Array.from(bytes));
     const res = decodePacket(decoded!);
     expect(res.ok && res.packet.type === 'entry' && 'drawing' in res.packet && res.packet.drawing).toEqual(drawing());
+  });
+
+  it('a later 16×16 drawing packet (46 bytes) and the control packets decode', () => {
+    for (const p of [
+      encodePacket({ type: 'entry', gameId: 0xff80, step: 7, name: 'ABCDEFG', drawing: drawing() }),
+      encodePacket({ type: 'need', gameId: 9, step: 3 }),
+      encodePacket({ type: 'results', gameId: 9, funniest: 2, recognizable: 3, recovery: 4, final: 1 }),
+      encodePacket({ type: 'reveal', gameId: 9, players: 5 }),
+    ]) {
+      const samples = tx.encode(p);
+      console.log(`${p.length}-byte chirp: ${tx.durationMs(samples)} ms (synthetic)`);
+      const decoded = receiveOverWire(rx, samples);
+      expect(decoded && Array.from(decoded)).toEqual(Array.from(p));
+    }
+  });
+
+  it('the handshake plays only before a fresh start signal, never on entries or resends (R4.1)', () => {
+    for (const type of ['entry', 'reveal', 'results', 'need']) {
+      expect(wantsHandshake(type, { effects: true, resend: false })).toBe(false);
+    }
+    expect(wantsHandshake('start', { effects: true, resend: false })).toBe(true);
+    expect(wantsHandshake('start', { effects: true, resend: true })).toBe(false);
+    expect(wantsHandshake('start', { effects: false, resend: false })).toBe(false);
   });
 
   it('reports chirp duration for the largest guess packet (26 bytes)', () => {
@@ -58,11 +81,10 @@ describe('ggwave pipeline in Node (synthetic waveform, no air path)', () => {
     expect(receiveOverWire(rx, samples)).not.toBeNull();
   });
 
-  it('the dial-up handshake played before a chirp does not stop it from decoding (R5.2)', () => {
+  it('the dial-up handshake played before a start chirp does not stop it from decoding', () => {
     for (const p of [
+      encodePacket({ type: 'start', gameId: 77, players: 5, name: 'Asha', noise: 2, mode: 'match', matchId: 77, round: 2, category: 4 }),
       encodePacket({ type: 'entry', gameId: 77, step: 3, name: 'Cy', drawing: drawing() }),
-      encodePacket({ type: 'start', gameId: 77, players: 5, name: 'Asha', noise: 2 }),
-      encodePacket({ type: 'award', gameId: 77, step: 4 }),
     ]) {
       const lead = handshakeSamples(SAMPLE_RATE, p[p.length - 1]);
       const decoded = receiveOverWire(rx, concatSamples(lead, tx.encode(p)));

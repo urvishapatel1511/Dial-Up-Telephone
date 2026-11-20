@@ -24,15 +24,15 @@
     <section id="settings" class="card settings" aria-label="Settings" hidden>
       <label class="switch">
         <input id="fx-toggle" type="checkbox" checked />
-        Sound effects (dial-up handshake before each chirp, jingles, static)
+        Sound effects (dial-up handshake at the start of a round, jingles, static)
       </label>
-      <p class="small">The <b>chirps</b> are how the game sends drawings and guesses between phones, so they always play. This switch only turns off the decorative sounds. Turn it off if chirps are often missed.</p>
+      <p class="small">The <b>chirps</b> carry the drawings and guesses between phones, so they always play. This switch only turns off the decorative sounds. Turn it off if chirps are often missed.</p>
       <div class="offline">
         <button type="button" class="prepare small">📦 Prepare for offline play</button>
         <span class="offline-state" role="status" aria-live="polite"></span>
       </div>
       <div class="row">
-        <button id="leave" type="button" class="ghostly small">Leave this game</button>
+        <button id="leave" type="button" class="ghostly small">Leave this round</button>
         <button id="reset" type="button" class="ghostly small">Reset this player</button>
       </div>
       <details class="diag">
@@ -58,13 +58,13 @@
     <!-- LOBBY -->
     <section id="lobby" class="card intro" hidden>
       <p class="lede">
-        Remember <b>telephone</b>? Now every message hops between phones as the screech of a <b>1980s dial-up modem</b>, and the bad old phone line adds <b>static</b> on the way. One player draws a secret word, the next guesses the drawing, the next draws the guess… then everyone watches how badly it mutated, scores points, and votes for the worst connection. No internet. Only sound.
+        Remember <b>telephone</b>? Here every message hops between phones as the screech of a <b>1980s dial-up modem</b>, and the bad old line adds <b>static</b> on the way. One player draws a secret word, the next guesses the drawing, the next draws the guess… then everyone watches how it mutated, votes for awards, and plays again. No internet. Only sound.
       </p>
       <ol class="guide">
-        <li><b>3–8 players</b>, each with a phone or laptop. Sit in a circle in seat order.</li>
+        <li><b>2–8 players</b>, each with a phone or laptop. Sit in a circle in seat order.</li>
         <li><b>Allow the microphone</b> and turn the volume up. On iPhone, turn off silent mode.</li>
         <li>Keep devices within about <b>1 m</b> of each other. Be quiet while a chirp plays.</li>
-        <li>Missed a chirp? The sender presses <b>Resend</b>. Nothing breaks.</li>
+        <li>Missed a chirp? Tap <b>Ask for it by sound</b>. Nothing breaks.</li>
       </ol>
       <label class="name">
         Your name (up to 7 letters)
@@ -72,7 +72,7 @@
       </label>
       <div class="roles">
         <button id="choose-host" type="button" class="role">
-          <span class="role-icon" aria-hidden="true">☎️</span><b>Host a game</b><small>you are seat 1 and draw first</small>
+          <span class="role-icon" aria-hidden="true">☎️</span><b>Host a game</b><small>you are seat 1 and start each round</small>
         </button>
         <button id="choose-join" type="button" class="role">
           <span class="role-icon" aria-hidden="true">📻</span><b>Join a game</b><small>pick your seat and listen</small>
@@ -88,7 +88,7 @@
     <!-- JOIN: seat picker -->
     <section id="join" class="card" hidden>
       <h2>Pick your seat</h2>
-      <p>The host is seat 1. Sit around the table in order and say your seat number out loud.</p>
+      <p>The host is seat 1. Sit around the table in order and say your seat number out loud, so nobody picks the same one.</p>
       <div id="seats" class="seats" role="radiogroup" aria-label="Your seat"></div>
       <div class="actions">
         <button id="ready" type="button" class="primary">I'm ready: listen for the host</button>
@@ -100,31 +100,30 @@
     <section id="host" class="card" hidden>
       <h2>Host a game</h2>
       <div class="field">
+        <span class="label" id="mode-label">Game</span>
+        <div id="modes" class="choices two" role="radiogroup" aria-labelledby="mode-label"></div>
+      </div>
+      <div class="field">
         <span class="label" id="players-label">Players (including you)</span>
         <div class="stepper" role="group" aria-labelledby="players-label">
           <button id="players-minus" type="button" aria-label="Fewer players">−</button>
           <output id="players" aria-live="polite">4</output>
           <button id="players-plus" type="button" aria-label="More players">+</button>
         </div>
+        <p id="fair-note" class="small"></p>
       </div>
       <div class="field">
         <span class="label" id="noise-label">Phone line quality</span>
         <div id="noise" class="noise" role="radiogroup" aria-labelledby="noise-label"></div>
       </div>
       <div class="field">
-        <span class="label">Secret word (only you see it)</span>
-        <p id="word" class="word"></p>
-        <div class="row">
-          <button id="reroll" type="button" class="ghostly small">🎲 Another word</button>
-          <label class="name inline">
-            or type your own
-            <input id="custom-word" maxlength="12" autocomplete="off" spellcheck="false" placeholder="up to 12 letters" />
-          </label>
-        </div>
+        <span class="label" id="cat-label">Prompt category</span>
+        <div id="categories" class="choices" role="radiogroup" aria-labelledby="cat-label"></div>
+        <p class="small">The first drawer of each round picks the secret word privately from this category, or types their own.</p>
       </div>
       <p class="small">Make sure every other player has pressed <b>I'm ready</b> first. Then start: your device chirps the start signal to the room.</p>
       <div class="actions">
-        <button id="start" type="button" class="primary">Start the game</button>
+        <button id="start" type="button" class="primary">Start</button>
         <button id="back-from-host" type="button" class="ghostly">Back</button>
       </div>
     </section>
@@ -135,6 +134,8 @@
         <h2>The line</h2>
         <p id="line-meta" class="small"></p>
         <ol id="line" class="line"></ol>
+        <p id="conflict" class="conflict" role="alert" hidden></p>
+        <button id="resend-start" type="button" class="ghostly small" hidden>↻ Resend the start signal</button>
       </aside>
 
       <section id="task" class="card task-panel" tabindex="-1" aria-labelledby="t-title">
@@ -142,13 +143,45 @@
         <h2 id="t-title"></h2>
         <p id="t-text"></p>
 
+        <div id="word-box" class="word-box" hidden>
+          <span class="label">Your secret word (only you see it) · <span id="word-cat"></span></span>
+          <p id="word" class="word"></p>
+          <div class="row">
+            <button id="reroll" type="button" class="ghostly small">🎲 Another word</button>
+            <label class="name inline">
+              or type your own
+              <input id="custom-word" maxlength="12" autocomplete="off" spellcheck="false" placeholder="up to 12 letters" />
+            </label>
+          </div>
+        </div>
+
         <div id="prompt-text" class="prompt-word" hidden></div>
         <div id="prompt-drawing" class="prompt-drawing" hidden></div>
         <p id="static-note" class="static-note" hidden></p>
 
-        <div id="draw-box" hidden>
-          <div id="editor" class="editor"></div>
-          <button id="clear" type="button" class="ghostly small">Clear drawing</button>
+        <div id="room-box" class="room-box" hidden>
+          <div id="room-drawing" class="prompt-drawing"></div>
+          <p id="room-answer" class="room-answer" hidden></p>
+          <div class="row">
+            <button id="room-show" type="button" class="small">Show me the answer</button>
+            <button id="room-yes" type="button" class="small" aria-pressed="false">✓ The room got it</button>
+            <button id="room-no" type="button" class="small" aria-pressed="false">✗ Nobody got it</button>
+          </div>
+        </div>
+
+        <div id="draw-box" class="draw-box" hidden>
+          <div class="toolbar" role="group" aria-label="Drawing tools">
+            <button id="tool-pen" type="button" class="small" aria-pressed="true">✏️ Pen</button>
+            <button id="tool-eraser" type="button" class="small" aria-pressed="false">🧽 Eraser</button>
+            <button id="brush-small" type="button" class="small" aria-pressed="true" aria-label="Small brush, 1 square">▪ Small</button>
+            <button id="brush-large" type="button" class="small" aria-pressed="false" aria-label="Large brush, 3 by 3 squares">■ Large</button>
+            <button id="undo" type="button" class="small" aria-label="Undo">↶ Undo</button>
+            <button id="redo" type="button" class="small" aria-label="Redo">↷ Redo</button>
+            <button id="clear" type="button" class="small">🗑 Clear</button>
+            <button id="bigger" type="button" class="small" aria-pressed="false">⤢ Bigger canvas</button>
+          </div>
+          <div id="editor"></div>
+          <p class="small">Tap or drag to draw. Keyboard: arrow keys move, Space paints, Ctrl+Z undoes.</p>
         </div>
 
         <label id="guess-box" class="name guess" hidden>
@@ -159,28 +192,70 @@
         <p id="t-wait" class="away" hidden></p>
         <div class="actions">
           <button id="primary" type="button" class="primary" hidden></button>
+          <button id="secondary" type="button" hidden></button>
+          <button id="tertiary" type="button" class="ghostly" hidden></button>
         </div>
       </section>
     </main>
 
+    <!-- RECOVERY (moved into the game or the reveal when needed) -->
+    <section id="recovery" class="card recovery" aria-labelledby="rec-title" hidden>
+      <h3 id="rec-title">Missed something?</h3>
+      <ul id="rec-list" class="rec-list"></ul>
+      <p id="relay-text" class="small" hidden></p>
+      <button id="relay" type="button" class="small" hidden></button>
+    </section>
+
     <!-- REVEAL -->
     <section id="reveal" class="card reveal" hidden aria-labelledby="reveal-title">
+      <p id="round-tag" class="step"></p>
       <h2 id="reveal-title">The reveal</h2>
       <p id="reveal-result" class="result" aria-live="polite"></p>
-      <ol id="chain" class="chain"></ol>
-      <div class="actions">
+      <div class="actions show-controls" role="group" aria-label="Reveal show">
+        <button id="reveal-prev" type="button">◀ Previous</button>
         <button id="reveal-play" type="button" class="primary">▶ Play the show</button>
-        <button id="reveal-next" type="button">Next hop</button>
+        <button id="reveal-next" type="button">Next ▶</button>
         <button id="reveal-all" type="button" class="ghostly">Show all</button>
       </div>
-      <div id="award-box" class="award-box" hidden>
-        <p id="award-text"></p>
+      <ol id="chain" class="chain"></ol>
+
+      <div id="results-box" class="award-box" hidden>
+        <p id="awards-text"></p>
+        <form id="results-form" hidden>
+          <p class="small">Vote out loud, then record the winners. Vote for honest attempts, not deliberate sabotage.</p>
+          <label class="pick">🤣 Funniest Transformation <select id="aw-funniest"></select></label>
+          <label class="pick">🎯 Most Recognizable Drawing <select id="aw-recognizable"></select></label>
+          <label id="aw-recovery-box" class="pick">💪 Best Recovery (made sense of static) <select id="aw-recovery"></select></label>
+          <label id="aw-final-box" class="pick">
+            Did the room guess the last drawing?
+            <select id="aw-final">
+              <option value="0">Not recorded</option>
+              <option value="1">Yes, the room got it</option>
+              <option value="2">No, nobody got it</option>
+            </select>
+          </label>
+          <div class="actions">
+            <button id="send-results" type="submit" class="primary">Chirp the awards to everyone</button>
+          </div>
+        </form>
       </div>
+
       <div id="scores-box" hidden>
-        <h3>Scores</h3>
+        <h3 id="scores-title">Scores</h3>
         <ol id="scores" class="scores"></ol>
-        <p class="small">A drawer and a guesser each score 1 point when the guess matches what the drawer was given. The Worst Connection award is worth 1 point.</p>
+        <p id="scores-note" class="small"></p>
       </div>
+
+      <div id="match-box" hidden>
+        <h3 id="match-title">Party Match totals</h3>
+        <ol id="standings" class="scores"></ol>
+      </div>
+
+      <div id="final-box" class="final" role="status" hidden>
+        <p class="confetti" aria-hidden="true">🎉 📞 🎉 📞 🎉</p>
+        <p id="final-text" class="final-text"></p>
+      </div>
+
       <details class="stats">
         <summary>Inside the chirps</summary>
         <p id="reveal-stats"></p>

@@ -9,6 +9,14 @@
  */
 export const HANDSHAKE_GAP_S = 0.3;
 
+/**
+ * The full handshake only "dials" a connection: the start of a round. Entries,
+ * reveal, results, requests, and every resend play the data chirp alone.
+ */
+export function wantsHandshake(type: string, opts: { effects: boolean; resend: boolean }): boolean {
+  return opts.effects && !opts.resend && type === 'start';
+}
+
 const ROW = [697, 770, 852, 941];
 const COL = [1209, 1336, 1477];
 
