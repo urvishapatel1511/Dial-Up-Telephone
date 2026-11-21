@@ -2,7 +2,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { crc8 } from '../src/protocol/crc8';
 import { emptyGrid } from '../src/protocol/drawing';
-import { cleanName, cleanText, decodePacket, encodePacket, MAGIC, MAX_PACKET, packetKey, type Packet } from '../src/protocol/packet';
+import { cleanName, cleanText, decodePacket, encodePacket, MAGIC, maskToSeats, MAX_PACKET, NEED_START, packetKey, seatsToMask, type Packet } from '../src/protocol/packet';
 import { packetArb } from './arbitraries';
 
 const reseal = (b: Uint8Array) => {
@@ -47,6 +47,23 @@ describe('v3 packets round-trip (C3)', () => {
     expect(encodePacket({ type: 'results', gameId: 1, funniest: 8, recognizable: 7, recovery: 6, final: 2 }).length).toBe(9);
   });
 
+  it('ready check and results confirmation packets: call ≤ 16, hello ≤ 14, ack 7, need-start 7', () => {
+    expect(encodePacket({ type: 'call', gameId: 5, players: 8, name: 'ABCDEFG', confirmed: 0xff, duplicate: 0x0c }).length).toBe(16);
+    expect(encodePacket({ type: 'hello', gameId: 5, seat: 8, name: 'ABCDEFG' }).length).toBe(14);
+    expect(encodePacket({ type: 'ack', gameId: 5, seat: 2 }).length).toBe(7);
+    expect(encodePacket({ type: 'need', gameId: 5, step: NEED_START }).length).toBe(7);
+    expect(() => encodePacket({ type: 'hello', gameId: 5, seat: 9, name: 'A' })).toThrow();
+    expect(() => encodePacket({ type: 'call', gameId: 5, players: 4, name: 'A', confirmed: 256, duplicate: 0 })).toThrow();
+    expect(() => encodePacket({ type: 'need', gameId: 1, step: 10 })).toThrow();
+    expect(seatsToMask([1, 3, 8])).toBe(0b10000101);
+    expect(maskToSeats(0b10000101)).toEqual([1, 3, 8]);
+  });
+
+  it('call, hello, and ack keys name their seat, so they never look like each other', () => {
+    expect(packetKey({ type: 'hello', gameId: 5, seat: 3, name: 'Bo' })).toBe('5:hello:3');
+    expect(packetKey({ type: 'ack', gameId: 5, seat: 3 })).toBe('5:ack:3');
+  });
+
   it('start carries static level, mode, match ID, round, and category', () => {
     for (const noise of [0, 1, 2] as const) {
       for (const mode of ['quick', 'match'] as const) {
@@ -77,7 +94,7 @@ describe('v3 packets round-trip (C3)', () => {
     expect(() => encodePacket(start({ noise: 3 as never }))).toThrow();
     expect(() => encodePacket(start({ round: 4 }))).toThrow();
     expect(() => encodePacket(start({ category: 8 }))).toThrow();
-    expect(() => encodePacket({ type: 'need', gameId: 1, step: 9 })).toThrow();
+    expect(() => encodePacket({ type: 'need', gameId: 1, step: 10 })).toThrow(); // 9 is "ask to join"
     expect(() => encodePacket({ type: 'results', gameId: 1, funniest: 9, recognizable: 0, recovery: 0, final: 0 })).toThrow();
   });
 
@@ -149,8 +166,11 @@ describe('invalid packets are rejected', () => {
     bad[7] = 3;
     expect(decodePacket(reseal(bad))).toEqual({ ok: false, error: 'bad-count' });
     const n = encodePacket({ type: 'need', gameId: 1, step: 2 });
-    n[4] = 9;
+    n[4] = 10;
     expect(decodePacket(reseal(n))).toEqual({ ok: false, error: 'bad-count' });
+    const h = encodePacket({ type: 'hello', gameId: 1, seat: 2, name: 'Bo' });
+    h[4] = 0;
+    expect(decodePacket(reseal(h))).toEqual({ ok: false, error: 'bad-count' });
   });
 
   it('non-printable text', () => {

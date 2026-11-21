@@ -10,7 +10,9 @@ The classic **telephone** drawing game, played over a resurrected **1980s acoust
 
 - **Two ways to play:** ⚡ *Quick Round* (one chain) or 🏆 *Party Match* (three rounds with running totals and a final celebration). The first drawer moves one seat each round, so everyone gets to draw and to guess.
 - **Prompt categories:** Mix of everything, Spooky, Everyday things, Animals & food, and Silly combos ("ghost taxi", "vampire DJ", "zombie chef"…). The first drawer picks the word privately, rerolls it, or types their own.
-- **Drawing tools:** Pen and Eraser, small and large brushes, Undo/Redo (one step per stroke), Clear with confirmation, and a Bigger canvas for phones.
+- **Direct touch drawing:** touch an empty square to draw, start on a filled square to erase, and drag to continue. Undo/Redo (one step per stroke), an optional large brush, Clear with confirmation, and a full-screen Bigger canvas with Done.
+- **Ready check:** the host sees who is really ready (their microphone works and their ready message arrived), duplicate seats, and missing seats. Start unlocks only when every seat is confirmed.
+- **Clear round flow:** Reveal → Awards (optional) → Results → Next round. Each phone confirms the results by sound, so the host sees who got them.
 - **Static you can laugh at:** on Crackly and Haunted lines, guesses twist into recognizable words (CAT → BAT, GHOST → GOAT) before falling back to nonsense letters. When static changed a clue, the next player is told: *"Draw whatever this makes you imagine—even if it's nonsense."*
 - **Recovery that works:** every phone knows which hops it missed. Tap **Ask for it by sound** and only the author's phone answers, so two phones never chirp at once. The host can't reveal while a hop is missing (unless they choose "Reveal with missing hops"), and hops recovered after the reveal fill the gap.
 - **Less waiting:** the dial-up handshake plays only when a round starts. Turns, requests, and resends are just the data chirp.
@@ -20,8 +22,8 @@ The classic **telephone** drawing game, played over a resurrected **1980s acoust
 ## How to play (2–8 players, best with 3+)
 
 1. Everyone opens the page, types a name, and allows the microphone. Sit in a circle in seat order.
-2. **Players** press *Join a game*, pick their seat (2–8), and press *I'm ready*.
-3. **The host** (seat 1) presses *Host a game*, chooses Quick Round or Party Match, the number of players, the phone line, and a prompt category, and presses *Start*. Every ready phone joins.
+2. **The host** (seat 1) presses *Host a game*. **Players** press *Join a game*, pick their seat (2–8), and press *I'm ready*. Their names appear on the host's screen.
+3. The host picks Quick Round or Party Match and the number of players (line quality and prompt category are under *Customize*), taps *Check who's ready* if anyone is missing, and presses *Start*.
 4. The first drawer picks a secret word and draws it on a 16×16 grid. The next player sees **only** that drawing (with static) and guesses. The next sees only the guess and draws it. And so on.
 5. When the last player is done, the host presses **Reveal**. One chirp, and every phone shows the whole chain. Vote for the awards out loud, and the host chirps the results. In a Party Match, the host then starts the next round and everyone joins automatically.
 
@@ -47,10 +49,11 @@ npm.cmd run dev:https # HTTPS on the LAN for phone microphone access
 
 ## How it works
 
-- `src/protocol/packet.ts`: v3 packets `start` / `entry` / `reveal` / `results` / `need`, at most 58 bytes, with a CRC-8. Older versions are rejected.
+- `src/protocol/packet.ts`: v3 packets `start` / `entry` / `reveal` / `results` / `need` / `call` / `hello` / `ack`, at most 58 bytes, with a CRC-8. Older versions are rejected.
+- `src/game/schedule.ts`: time slots for automatic replies, so phones answering a ready check or confirming results never chirp at once.
 - `src/game/telephone.ts`: pure game state for one player: joining, turns, secrecy, static, missing-hop tracking and recovery, reveal, scores, awards, Party Match totals, duplicate/stale handling.
 - `src/game/match.ts`: the rotation and the one-chance-per-player rule. `src/game/words.ts`: prompt categories. `src/game/noise.ts`: deterministic line static with curated twists. `src/game/captions.ts`: factual reveal captions.
-- `src/game/canvas.ts` + `src/ui/editor.ts`: the drawing model (stroke-level undo/redo, brushes) and its accessible editor.
+- `src/game/canvas.ts` + `src/ui/editor.ts`: the drawing model (the start square decides paint or erase, stroke-level undo/redo, brushes) and its accessible editor (pointer capture for mouse, touch, and pen).
 - `src/audio/handshake.ts`: the synthesized dial-up handshake (start of a round only), tested to never block decoding.
 - `src/state/sender.ts`: commits a move only after its chirp has actually played. A failed playback can be retried with identical bytes.
 - `src/audio`: ggwave (vendored, MIT) turns bytes into sound and back. Also a live spectrum and switchable effects that never overlap a chirp.

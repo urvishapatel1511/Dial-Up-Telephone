@@ -33,13 +33,16 @@ The repository was renamed from `Ghost_frequency` to `Dial-Up-Telephone` by the 
 1.7 Waiting text says whose chirp is expected and offers "Ask for it by sound".
 1.8 Two devices on the same seat SHALL be detected (an entry for my step from another name) and reported, not silently merged.
 
-## R2. Drawing tools (16×16)
+## R2. Drawing (16×16, direct touch)
 
-2.1 Pen and Eraser tools, Small (1 square) and Large (3×3) brushes, Undo, Redo, Clear (with confirmation when not empty), and a Bigger canvas view for phones.
-2.2 Undo reverses one complete pointer stroke or one keyboard paint action. Redo re-applies it. A new action clears Redo. History is capped at 50 steps.
-2.3 Touch dragging, single-tab-stop arrow-key navigation, Space/Enter to paint, Ctrl+Z / Ctrl+Y, visible focus, tool buttons with accessible names and `aria-pressed`.
-2.4 The large brush is clipped at the grid edges.
-2.5 The drawing sent is exactly the canvas. The reveal shows the original drawing.
+2.1 There is no Pen/Eraser choice. **The square where a stroke starts decides the stroke:** pointer down on an empty square paints, on a filled square erases. The operation stays fixed until pointerup, pointercancel, or lost pointer capture. Revisiting a square in the same stroke never toggles it again. A tap changes one square (or one brush footprint) once. Mouse, touch, and stylus behave the same.
+2.2 Undo reverses one complete stroke or one keyboard action. Redo restores it. A new action after Undo clears Redo. History is capped at 50 steps.
+2.3 Release outside the grid and pointer cancellation end the stroke safely (the stroke so far is kept as one undo step). A pointer interaction never also counts as a click. Page scrolling is blocked only on the grid (`touch-action: none`). A second finger is ignored during a stroke.
+2.4 Keyboard: one tab stop, arrow keys and Home/End move, Space/Enter toggles the focused square, Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z (and Ctrl+Y) redoes. Squares keep their row/column labels, `aria-pressed` filled state, and visible focus.
+2.5 The small brush is the default. Brush size (Small 1 square / Large 3×3, clipped at the edges) and Clear (confirmation when not empty) sit in a compact secondary row. The instruction reads: "Touch empty squares to draw. Start on a filled square to erase. Drag to continue."
+2.6 **Bigger canvas** opens a full-screen drawing view that nothing covers: Undo, Redo, and **Done** at the top, the clue in one line, a small audio indicator instead of the status bar, the grid sized to fit the screen, and the send button at the bottom. Entering or leaving keeps the drawing and its undo history. Escape also closes it.
+2.7 While a player draws, the sound status bar is compact and not sticky, so it never covers squares.
+2.8 The drawing sent is exactly the canvas. The packet format and the reveal's original drawing are unchanged.
 
 ## R3. Static that is fun and understandable
 
@@ -83,6 +86,31 @@ The repository was renamed from `Ghost_frequency` to `Dial-Up-Telephone` by the 
 The host is told to vote for honest attempts, not deliberate sabotage. Automatic comparison only checks guesses against text, never drawing quality.
 7.5 One `results` chirp carries the awards and the room's final guess, so every device scores identically.
 7.6 Match progress (rounds, names, points) persists across refreshes. Players join the next round's start automatically, even if they missed the previous reveal. Round, position, role, and next action are always shown.
+
+## R9. Ready check before the first round
+
+9.1 A player is **ready** only when their microphone started successfully *and* the host's phone received their `hello` chirp. Tapping "I'm ready" starts the microphone, then plays `hello` (seat and name) once it works.
+9.2 The host's setup screen starts listening (opening it is a user gesture) and shows the roster: seat 1 (you), every seat up to N with its confirmed name, "not ready yet" for missing seats, duplicates, and seats above N.
+9.3 **Check who's ready** plays a `call` chirp listing the confirmed and duplicated seats. Every listening player whose seat is not confirmed answers with `hello` in its own time slot (ordered by seat), so replies never overlap. Confirmed and duplicated seats stay quiet.
+9.4 Duplicate seats (two names for one seat) are shown on the host with "Two phones picked seat 3: one of them taps Change my seat." Players on a duplicated seat see the same advice. A player who changes seat moves to the new seat in the host's roster.
+9.5 Start is enabled only when every seat 2..N has exactly one confirmed name. Seats above N get a warning but don't block.
+9.6 After Start, the host's text says the start signal **played**. Nobody is shown as joined until evidence arrives (their turn is heard).
+9.7 Targeted start recovery: a ready player who hears a turn from a round they're not in sees "A round started without you" and can tap **Ask to join**. That plays `need` for the start (step 9). Only the host answers, with the start signal. The host's Resend the start signal stays.
+9.8 Players see "ready message sent" separately from "✓ confirmed by the host" (their seat is in the host's call).
+
+## R10. Simple host setup
+
+10.1 One prominent Start button. Defaults: Quick Round, 4 players, Crackly, Mix of everything.
+10.2 Mode (Quick Round / Party Match, one line each) and the player count stay on the main screen. Line quality and prompt category are under **Customize**, whose summary shows the current choices.
+
+## R11. Round transitions
+
+11.1 One flow on every device: **Reveal → Awards (optional) → Send results → Next round**, shown as a step indicator.
+11.2 The host can send results with no awards. With an odd player count the room guess must be answered explicitly (got it / nobody got it / we skipped it) before results can be sent.
+11.3 Each player's phone confirms results with an `ack` chirp in its own seat slot. Duplicate results chirps are re-acknowledged and never re-scored.
+11.4 The host sees "Results sent" and, per seat, "✓ confirmed" or "waiting". Send results again replays identical bytes.
+11.5 The next round (or another Quick Round) requires sent results. If some seats haven't confirmed, the host must confirm "Continue without …" first. `nextRound` refuses a round without results.
+11.6 Players always see the next action: "Vote out loud", "✓ Results received", "Waiting for the host to start round 2", or "Ask for the results".
 
 ## R8. Audio, reliability, and accessibility (kept)
 

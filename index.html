@@ -12,8 +12,11 @@
 
     <header class="topbar">
       <div class="brand">
-        <h1>Dial-Up Telephone</h1>
-        <p class="tag">The drawing game that travels by modem sound.</p>
+        <span class="logo" aria-hidden="true"><span class="logo-icon">☎</span><span class="logo-waves"><i></i><i></i><i></i></span></span>
+        <div>
+          <h1>Dial-Up Telephone</h1>
+          <p class="tag"><span class="prompt" aria-hidden="true">ATDT ▸</span> The drawing game that travels by modem sound.</p>
+        </div>
       </div>
       <div class="top-actions">
         <span id="me-badge" class="role-badge" hidden></span>
@@ -57,15 +60,26 @@
 
     <!-- LOBBY -->
     <section id="lobby" class="card intro" hidden>
-      <p class="lede">
-        Remember <b>telephone</b>? Here every message hops between phones as the screech of a <b>1980s dial-up modem</b>, and the bad old line adds <b>static</b> on the way. One player draws a secret word, the next guesses the drawing, the next draws the guess… then everyone watches how it mutated, votes for awards, and plays again. No internet. Only sound.
-      </p>
-      <ol class="guide">
-        <li><b>2–8 players</b>, each with a phone or laptop. Sit in a circle in seat order.</li>
-        <li><b>Allow the microphone</b> and turn the volume up. On iPhone, turn off silent mode.</li>
-        <li>Keep devices within about <b>1 m</b> of each other. Be quiet while a chirp plays.</li>
-        <li>Missed a chirp? Tap <b>Ask for it by sound</b>. Nothing breaks.</li>
+      <div class="hero" aria-hidden="true">
+        <div class="hero-screen">
+          <p class="hero-line"><span>ATDT 555-0199</span><span class="hero-ok">CONNECT 2400</span></p>
+          <div class="hero-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        </div>
+      </div>
+      <h2 class="hero-title">Telephone, played over a 1980s modem.</h2>
+      <p class="lede">Every drawing and guess hops between phones as a modem screech, and the bad old line adds <b>static</b> on the way. No internet. Only sound.</p>
+      <ol class="how" aria-label="How a round works">
+        <li><span class="how-icon" aria-hidden="true">✏️</span><b>Draw</b><small>a secret word</small></li>
+        <li><span class="how-icon" aria-hidden="true">💬</span><b>Guess</b><small>the drawing</small></li>
+        <li><span class="how-icon" aria-hidden="true">📡</span><b>Static</b><small>twists it</small></li>
+        <li><span class="how-icon" aria-hidden="true">🎉</span><b>Reveal</b><small>laugh, vote, replay</small></li>
       </ol>
+      <ul class="tips">
+        <li><b>2–8 players</b>, one phone or laptop each, sitting in seat order</li>
+        <li><b>Allow the microphone</b>, volume up (iPhone: silent mode off)</li>
+        <li>Devices within about <b>1 m</b>. Quiet while a chirp plays</li>
+        <li>Missed one? <b>Ask for it by sound</b>. Nothing breaks</li>
+      </ul>
       <label class="name">
         Your name (up to 7 letters)
         <input id="name" maxlength="7" autocomplete="nickname" spellcheck="false" placeholder="Asha" />
@@ -112,16 +126,24 @@
         </div>
         <p id="fair-note" class="small"></p>
       </div>
-      <div class="field">
-        <span class="label" id="noise-label">Phone line quality</span>
-        <div id="noise" class="noise" role="radiogroup" aria-labelledby="noise-label"></div>
+      <details id="customize" class="customize">
+        <summary id="customize-summary">Customize</summary>
+        <div class="field">
+          <span class="label" id="noise-label">Phone line quality</span>
+          <div id="noise" class="noise" role="radiogroup" aria-labelledby="noise-label"></div>
+        </div>
+        <div class="field">
+          <span class="label" id="cat-label">Prompt category</span>
+          <div id="categories" class="choices" role="radiogroup" aria-labelledby="cat-label"></div>
+          <p class="small">The first drawer of each round picks the secret word privately from this category, or types their own.</p>
+        </div>
+      </details>
+      <div class="field roster-box">
+        <span class="label" id="roster-label">Who's ready</span>
+        <ol id="roster" class="roster" aria-labelledby="roster-label"></ol>
+        <p id="roster-note" class="small" role="status" aria-live="polite"></p>
+        <button id="check" type="button" class="small">📣 Check who's ready</button>
       </div>
-      <div class="field">
-        <span class="label" id="cat-label">Prompt category</span>
-        <div id="categories" class="choices" role="radiogroup" aria-labelledby="cat-label"></div>
-        <p class="small">The first drawer of each round picks the secret word privately from this category, or types their own.</p>
-      </div>
-      <p class="small">Make sure every other player has pressed <b>I'm ready</b> first. Then start: your device chirps the start signal to the room.</p>
       <div class="actions">
         <button id="start" type="button" class="primary">Start</button>
         <button id="back-from-host" type="button" class="ghostly">Back</button>
@@ -142,6 +164,7 @@
         <p id="t-step" class="step"></p>
         <h2 id="t-title"></h2>
         <p id="t-text"></p>
+        <ul id="checks" class="checks" hidden></ul>
 
         <div id="word-box" class="word-box" hidden>
           <span class="label">Your secret word (only you see it) · <span id="word-cat"></span></span>
@@ -170,18 +193,26 @@
         </div>
 
         <div id="draw-box" class="draw-box" hidden>
+          <!-- Shown only in the full-screen view: the clue and a small sound indicator. -->
+          <div class="draw-head">
+            <span id="big-clue" class="big-clue"></span>
+            <span id="big-audio" class="mini-audio"></span>
+          </div>
           <div class="toolbar" role="group" aria-label="Drawing tools">
-            <button id="tool-pen" type="button" class="small" aria-pressed="true">✏️ Pen</button>
-            <button id="tool-eraser" type="button" class="small" aria-pressed="false">🧽 Eraser</button>
-            <button id="brush-small" type="button" class="small" aria-pressed="true" aria-label="Small brush, 1 square">▪ Small</button>
-            <button id="brush-large" type="button" class="small" aria-pressed="false" aria-label="Large brush, 3 by 3 squares">■ Large</button>
             <button id="undo" type="button" class="small" aria-label="Undo">↶ Undo</button>
             <button id="redo" type="button" class="small" aria-label="Redo">↷ Redo</button>
-            <button id="clear" type="button" class="small">🗑 Clear</button>
-            <button id="bigger" type="button" class="small" aria-pressed="false">⤢ Bigger canvas</button>
+            <button id="bigger" type="button" class="small" aria-expanded="false">⤢ Bigger canvas</button>
           </div>
           <div id="editor"></div>
-          <p class="small">Tap or drag to draw. Keyboard: arrow keys move, Space paints, Ctrl+Z undoes.</p>
+          <p class="draw-hint">Touch empty squares to draw. Start on a filled square to erase. Drag to continue.</p>
+          <div class="tool-extra" role="group" aria-label="Brush size and clear">
+            <span class="small">Brush</span>
+            <button id="brush-small" type="button" class="small" aria-pressed="true" aria-label="Small brush, 1 square">▪ Small</button>
+            <button id="brush-large" type="button" class="small" aria-pressed="false" aria-label="Large brush, 3 by 3 squares">■ Large</button>
+            <button id="clear" type="button" class="small">🗑 Clear</button>
+          </div>
+          <p class="small kbd-hint">Keyboard: arrow keys move, Space toggles a square, Ctrl+Z undoes, Ctrl+Shift+Z redoes.</p>
+          <button id="big-send" type="button" class="primary big-send" hidden></button>
         </div>
 
         <label id="guess-box" class="name guess" hidden>
@@ -210,6 +241,12 @@
     <section id="reveal" class="card reveal" hidden aria-labelledby="reveal-title">
       <p id="round-tag" class="step"></p>
       <h2 id="reveal-title">The reveal</h2>
+      <ol id="flow" class="flow" aria-label="Round steps">
+        <li>Reveal</li>
+        <li>Awards (optional)</li>
+        <li>Results</li>
+        <li>Next round</li>
+      </ol>
       <p id="reveal-result" class="result" aria-live="polite"></p>
       <div class="actions show-controls" role="group" aria-label="Reveal show">
         <button id="reveal-prev" type="button">◀ Previous</button>
@@ -227,17 +264,20 @@
           <label class="pick">🎯 Most Recognizable Drawing <select id="aw-recognizable"></select></label>
           <label id="aw-recovery-box" class="pick">💪 Best Recovery (made sense of static) <select id="aw-recovery"></select></label>
           <label id="aw-final-box" class="pick">
-            Did the room guess the last drawing?
+            Did the room guess the last drawing? (required: it scores the last drawer)
             <select id="aw-final">
-              <option value="0">Not recorded</option>
+              <option value="">Choose…</option>
               <option value="1">Yes, the room got it</option>
               <option value="2">No, nobody got it</option>
+              <option value="0">We skipped it</option>
             </select>
           </label>
           <div class="actions">
-            <button id="send-results" type="submit" class="primary">Chirp the awards to everyone</button>
+            <button id="send-results" type="submit" class="primary">Send results</button>
           </div>
         </form>
+        <p id="acks" class="acks" role="status" aria-live="polite" hidden></p>
+        <button id="resend-results" type="button" class="small" hidden>↻ Send results again</button>
       </div>
 
       <div id="scores-box" hidden>

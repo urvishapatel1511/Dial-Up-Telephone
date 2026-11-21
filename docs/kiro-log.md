@@ -76,6 +76,21 @@ Bugs found during v3 work:
 - Browser check: **Previous** did nothing right after **Show all** (the card count was not clamped). Fixed in `src/main.ts`.
 - Screenshot review: the 🛟 emoji has no glyph on Windows (rendered as a box). Replaced with 💪. The host's own hop showed "♪ played" even after later hops proved it arrived; any later hop now counts as confirmation.
 
+## v3.1 refinement: drawing, setup, and round transitions
+
+The developer asked for simpler drawing, setup, and round transitions. v3 was committed locally first as a checkpoint (not pushed). The spec gained R2 (direct touch drawing, rewritten), R9 (ready check), R10 (host setup), and R11 (round flow) before code changed.
+
+Design decisions recorded in `design.md`:
+- **The start square decides** paint or erase, fixed for the whole stroke. Setting a fixed value is idempotent, so revisits can't toggle. Fast drags fill the line between samples.
+- **One pointer handler on the grid** with pointer capture, mapping coordinates to squares itself, so mouse, touch, and pen run the same code. Clicks count only from the keyboard.
+- **Ready means heard:** a `hello` plays only after the microphone starts, and only the host's reception counts. The `call` lists confirmed and duplicated seats so those phones stay quiet, and the rest answer in seat-ordered 2.4 s slots.
+- **Results acks** in 1.9 s seat slots. Slot lengths are checked against the real encoder (hello 1579 ms, ack 1323 ms, synthetic). No effects play on events that schedule replies, so a jingle can't cover a reply.
+- `nextRound` now refuses a round without results.
+
+Bugs found during this work:
+- Browser check: the player's ready screen said "Microphone is off" right after the ready message played, because the microphone restarts after a chirp. The check now shows "Starting the microphone…" in that moment, and the test waits for the restart.
+- Unit test: a repeated `hello` produced a new state object (not idempotent). Fixed.
+
 ## Verification (latest)
 
 - `npm.cmd run check`: typecheck, production build, and 107 automated tests in 10 files (`tests/`): packets v3, game rules with a simulated room of 2–8 devices (missing hops, targeted recovery, recovery after the reveal, duplicates, stale rounds, seat clashes, scoring, awards, Party Match totals, refresh), rotation and fairness, prompts, static twists, the drawing model, captions, offline build, and synthetic ggwave (58-byte packet and handshake schedule).

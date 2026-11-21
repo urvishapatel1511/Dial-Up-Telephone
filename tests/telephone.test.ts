@@ -12,12 +12,14 @@ import {
   entryAt,
   initialState,
   knownMissed,
+  knownNames,
   leaveGame,
   loadState,
   matchOver,
   matchStandings,
   missingSteps,
   myStep,
+  nameOfSeat,
   nextRound,
   outgoingFor,
   phaseOf,
@@ -493,14 +495,29 @@ describe('Party Match (R7)', () => {
     expect(matchOver(back)).toBe(true);
   });
 
-  it('the next round needs a revealed round, and only the host can start it', () => {
+  it('the next round needs a revealed round with results, and only the host can start it', () => {
     const r = room(3);
     r.start({ mode: 'match' });
     expect(nextRound(r.devices[0], 9, 0)).toBeNull();
     r.playAll();
     r.reveal();
+    expect(nextRound(r.devices[0], 9, 0)).toBeNull(); // no results yet: can't skip them by accident
+    r.results({});
     expect(nextRound(r.devices[1], 9, 0)).toBeNull();
     expect(nextRound(r.devices[0], 9, 0)).not.toBeNull();
+  });
+
+  it('names learned in earlier rounds are remembered for the next round (names only)', () => {
+    const r = room(2);
+    r.start({ mode: 'match', gameId: 0x7200 });
+    r.playAll();
+    r.reveal();
+    r.results({});
+    r.play(0, nextRound(r.devices[0], 0x7201, 5));
+    const host = r.devices[0];
+    expect(nameOfSeat(host.game!, 2, 'Asha')).toBeNull(); // Bo hasn't played this round yet
+    expect(knownNames(host)).toEqual({ '1': 'Asha', '2': 'Bo' });
+    expect(JSON.stringify(knownNames(host))).not.toContain('pumpkin');
   });
 
   it('a player who missed the reveal still joins the next round of the same match', () => {

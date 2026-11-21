@@ -4,7 +4,9 @@ import { packGrid, unpackGrid, type Grid } from './drawing';
 /**
  * Dial-Up Telephone packet v3 (see .kiro/specs/ghost-frequency/design.md), ≤ 58 bytes:
  *  0     magic 0xD3
- *  1     bits0-3 type: 1 start · 2 entry · 3 reveal · 4 results · 5 need · bits4-5 static level (start only)
+ *  1     bits0-3 type: 1 start · 2 entry · 3 reveal · 4 results · 5 need · 6 call · 7 hello · 8 ack
+ *        bits4-5 static level (start only)
+ *  6-7   call: confirmed-seat mask, duplicated-seat mask
  *  2-3   game ID (uint16 BE)
  *  4     start/reveal: players · entry/need: step · results: funniest step
  *  5     bits0-3 text length · bits4-7 name length
@@ -28,8 +30,15 @@ export type GameMode = 'quick' | 'match';
 /** The room's out-loud guess of the last drawing (odd player counts): 0 not recorded, 1 got it, 2 missed. */
 export type FinalGuess = 0 | 1 | 2;
 
-const TYPE = { start: 1, entry: 2, reveal: 3, results: 4, need: 5 } as const;
-const TYPE_BY_NUM = ['', 'start', 'entry', 'reveal', 'results', 'need'] as const;
+/** `need` step that asks the host for the round's start signal ("Ask to join"). */
+export const NEED_START = 9;
+
+const TYPE = { start: 1, entry: 2, reveal: 3, results: 4, need: 5, call: 6, hello: 7, ack: 8 } as const;
+const TYPE_BY_NUM = ['', 'start', 'entry', 'reveal', 'results', 'need', 'call', 'hello', 'ack'] as const;
+
+/** Seat bit masks for `call`: bit (seat − 1). */
+export const seatsToMask = (seats: number[]) => seats.reduce((m, s) => m | (1 << (s - 1)), 0) & 0xff;
+export const maskToSeats = (mask: number) => Array.from({ length: 8 }, (_, i) => i + 1).filter((s) => mask & (1 << (s - 1)));
 
 export type Packet =
   | { type: 'start'; gameId: number; players: number; name: string; noise: NoiseLevel; mode: GameMode; matchId: number; round: number; category: number }
@@ -37,7 +46,13 @@ export type Packet =
   | { type: 'entry'; gameId: number; step: number; name: string; text: string }
   | { type: 'reveal'; gameId: number; players: number }
   | { type: 'results'; gameId: number; funniest: number; recognizable: number; recovery: number; final: FinalGuess }
-  | { type: 'need'; gameId: number; step: number };
+  | { type: 'need'; gameId: number; step: number }
+  /** Host's ready check. `confirmed` / `duplicate` are seat masks. */
+  | { type: 'call'; gameId: number; players: number; name: string; confirmed: number; duplicate: number }
+  /** A player's "I'm ready" (mic works). gameId is the lobby ID heard in a call, or 0. */
+  | { type: 'hello'; gameId: number; seat: number; name: string }
+  /** A player confirms it received the round's results. */
+  | { type: 'ack'; gameId: number; seat: number };
 
 export type PacketError = 'too-short' | 'too-long' | 'bad-magic' | 'bad-type' | 'bad-count' | 'bad-length' | 'bad-text' | 'bad-checksum';
 
@@ -110,8 +125,23 @@ export function encodePacket(p: Packet): Uint8Array {
       extra = [p.recognizable | (p.recovery << 4), p.final];
       break;
     case 'need':
-      if (!inRange(p.step, 0, PLAYERS_MAX)) throw new Error('step must be 0..8');
+      if (!inRange(p.step, 0, NEED_START)) throw new Error('step must be 0..9');
       count = p.step;
+      break;
+    case 'call':
+      if (!inRange(p.players, PLAYERS_MIN, PLAYERS_MAX) || !inRange(p.confirmed, 0, 0xff) || !inRange(p.duplicate, 0, 0xff)) throw new Error('bad call fields');
+      count = p.players;
+      name = req(cleanName(p.name), 'name');
+      extra = [p.confirmed, p.duplicate];
+      break;
+    case 'hello':
+      if (!inRange(p.seat, 1, PLAYERS_MAX)) throw new Error('seat must be 1..8');
+      count = p.seat;
+      name = req(cleanName(p.name), 'name');
+      break;
+    case 'ack':
+      if (!inRange(p.seat, 1, PLAYERS_MAX)) throw new Error('seat must be 1..8');
+      count = p.seat;
       break;
   }
   const body = [MAGIC, TYPE[p.type] | flags, p.gameId >> 8, p.gameId & 0xff, count, text.length | (name.length << 4), ...extra, ...drawing, ...ascii(text), ...ascii(name)];
@@ -137,7 +167,7 @@ export function decodePacket(b: Uint8Array): DecodeResult {
   const nameLen = b[5] >> 4;
   if (textLen > TEXT_MAX || nameLen > NAME_MAX) return fail('bad-length');
 
-  const extraLen = type === 'start' ? 3 : type === 'results' ? 2 : 0;
+  const extraLen = type === 'start' ? 3 : type === 'results' || type === 'call' ? 2 : 0;
   const drawingLen = type === 'entry' && isDrawingStep(count) ? DRAW_BYTES : 0;
   if (b.length !== 6 + extraLen + drawingLen + textLen + nameLen + 1) return fail('bad-length');
   const at = 6 + extraLen + drawingLen;
@@ -186,13 +216,25 @@ export function decodePacket(b: Uint8Array): DecodeResult {
     }
     case 'need':
       if (textLen || nameLen) return fail('bad-length');
-      if (count > PLAYERS_MAX) return fail('bad-count');
+      if (count > NEED_START) return fail('bad-count');
       return { ok: true, packet: { type, gameId, step: count } };
+    case 'call':
+      if (count < PLAYERS_MIN || count > PLAYERS_MAX) return fail('bad-count');
+      if (nameLen === 0 || textLen !== 0) return fail('bad-length');
+      return { ok: true, packet: { type, gameId, players: count, name, confirmed: b[6], duplicate: b[7] } };
+    case 'hello':
+      if (count < 1 || count > PLAYERS_MAX) return fail('bad-count');
+      if (nameLen === 0 || textLen !== 0) return fail('bad-length');
+      return { ok: true, packet: { type, gameId, seat: count, name } };
+    case 'ack':
+      if (count < 1 || count > PLAYERS_MAX) return fail('bad-count');
+      if (textLen || nameLen) return fail('bad-length');
+      return { ok: true, packet: { type, gameId, seat: count } };
   }
 }
 
 export function packetKey(p: Packet): string {
-  const step = p.type === 'entry' || p.type === 'need' ? p.step : 0;
+  const step = p.type === 'entry' || p.type === 'need' ? p.step : p.type === 'hello' || p.type === 'ack' ? p.seat : 0;
   return `${p.gameId}:${p.type}:${step}`;
 }
 
@@ -206,7 +248,13 @@ export function describePacket(p: Packet, bytes: number): string {
     case 'results':
       return `awards and scores · ${bytes} bytes`;
     case 'need':
-      return `request for a missed hop · ${bytes} bytes`;
+      return `${p.step === NEED_START ? 'request to join' : 'request for a missed hop'} · ${bytes} bytes`;
+    case 'call':
+      return `ready check · ${bytes} bytes`;
+    case 'hello':
+      return `ready message from seat ${p.seat} · ${bytes} bytes`;
+    case 'ack':
+      return `results confirmation from seat ${p.seat} · ${bytes} bytes`;
     case 'entry':
       if ('drawing' in p) return `16×16 drawing (32 bytes)${p.word ? ' + secret word' : ''} + name · ${bytes} bytes`;
       return `guess (${p.text.length} letters) + name · ${bytes} bytes`;

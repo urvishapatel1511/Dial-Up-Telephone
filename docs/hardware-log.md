@@ -28,6 +28,11 @@ Devices (model / browser): 1 ____________ 2 ____________ 3 ____________ 4 ______
 | Host missing a hop → no Reveal → Ask → Reveal appeared | | |
 | Missed hop after the reveal → Ask → filled in | | |
 | Missed reveal → Ask for the reveal | | |
+| Ready check: every player confirmed, replies one at a time | | |
+| Duplicate seat shown before the start | | |
+| Missed start → Ask to join | | |
+| Missed results → Send results again → ✓ | | |
+| Touch drawing checklist (section G), per phone | | |
 | Same seat twice → warning | | |
 | Seat too high → fix → Resend the start signal | | |
 | Refresh mid-match → totals kept | | |

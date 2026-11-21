@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { concatSamples, handshakeSamples, wantsHandshake } from '../src/audio/handshake';
+import { ACK_SLOT_MS, HELLO_SLOT_MS } from '../src/game/schedule';
 import { Modem } from '../src/audio/modem';
 import type { GgwaveFactory } from '../src/audio/ggwave-types';
 import { emptyGrid } from '../src/protocol/drawing';
@@ -63,6 +64,19 @@ describe('ggwave pipeline in Node (synthetic waveform, no air path)', () => {
       const decoded = receiveOverWire(rx, samples);
       expect(decoded && Array.from(decoded)).toEqual(Array.from(p));
     }
+  });
+
+  it('the longest ready message and results confirmation fit inside their reply slots, with margin', () => {
+    const hello = encodePacket({ type: 'hello', gameId: 0xffff, seat: 8, name: 'ABCDEFG' });
+    const ack = encodePacket({ type: 'ack', gameId: 0xffff, seat: 8 });
+    const call = encodePacket({ type: 'call', gameId: 0xffff, players: 8, name: 'ABCDEFG', confirmed: 0xff, duplicate: 0xff });
+    const helloMs = tx.durationMs(tx.encode(hello));
+    const ackMs = tx.durationMs(tx.encode(ack));
+    console.log(`hello ${hello.length} B: ${helloMs} ms · ack ${ack.length} B: ${ackMs} ms · call ${call.length} B (synthetic)`);
+    // at least 300 ms of silence between neighbouring replies
+    expect(helloMs + 300).toBeLessThanOrEqual(HELLO_SLOT_MS);
+    expect(ackMs + 300).toBeLessThanOrEqual(ACK_SLOT_MS);
+    for (const p of [hello, ack, call]) expect(Array.from(receiveOverWire(rx, tx.encode(p)) ?? [])).toEqual(Array.from(p));
   });
 
   it('the handshake plays only before a fresh start signal, never on entries or resends (R4.1)', () => {

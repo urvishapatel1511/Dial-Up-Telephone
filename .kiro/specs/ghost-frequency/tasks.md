@@ -22,14 +22,25 @@
 - [x] D2 Rotation, odd-N room final guess, awards (Funniest / Recognizable / Recovery) in one results chirp
 - [x] D3 Match archive and totals across refreshes, auto-join of the next round, final celebration
 
+## Phase E: simpler drawing, setup, and transitions (v3.1)
+- [x] E1 Direct touch drawing: the start square decides paint or erase for the whole stroke; line fill on fast drags; pointer capture, cancel, and outside release; no click double-toggle; Pen/Eraser removed; brush size and Clear in a compact row (R2)
+- [x] E2 Full-screen canvas: Undo/Redo/Done on top, clue line, mini sound indicator, send button at the bottom, Escape; compact non-sticky status bar while drawing (R2.6, R2.7)
+- [x] E3 Ready check: `hello` after the mic starts, host roster, `call` with confirmed/duplicate masks, seat-slot replies, duplicate and above-N seats, Start gated, "Ask to join" (`need` 9) (R9)
+- [x] E4 Host setup: defaults, one Start, Customize for line and category (R10)
+- [x] E5 Round flow: step indicator, optional awards, explicit odd-count room guess, `ack` per seat, results sent vs confirmed, Send results again, guarded next round, `nextRound` requires results (R11)
+
+- [x] E6 Visual theme (`src/theme.css`): CRT/modem look, keypad seats, wire line, printer-slip reveal, LED status; reduced motion and no-overflow checks
+
 ## Validation
-- [x] AUTO tests for every item above, including fairness for 2–8 players (10 files)
-- [x] BROWSER checks and screenshots at phone and laptop sizes (15 checks)
+- [x] AUTO tests for every item above, including fairness for 2–8 players, reply-slot spacing, and slot lengths against the real encoder (11 files)
+- [x] BROWSER checks and screenshots at phone and laptop sizes, including mouse, touch, and pen strokes (21 checks)
 - [x] Docs: README, hardware test with playtest checklist, hardware log template, Kiro log
 
 ## Developer (HW)
 - [ ] Quick Round and Party Match on 3+ devices. Playtest checklist in `docs/hardware-test.md`
 
-## Known limitations (v3)
-- A device that misses a round's results and then hears the next round's start keeps its own (lower) total for that round. The old round is retired, so it can't be asked for any more.
-- Seat clashes are detected only when the second phone hears an entry for its own step.
+## Known limitations
+- If the host continues past an unconfirmed seat (after the warning), that phone may keep a lower total for the round. The old round is retired, so it can't be asked for any more.
+- Two phones on one seat that only ever answer a ready check (never a spontaneous hello) reply in the same slot and collide; the host then sees that seat as missing, not duplicated.
+- Two players with the same name on the same seat look like one player.
+- Reply slots assume every phone hears the call/results end at about the same moment (true for one room).

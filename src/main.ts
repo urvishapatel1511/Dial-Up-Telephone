@@ -1,4 +1,5 @@
 import './style.css';
+import './theme.css';
 import { Listener, MIC_ERROR_TEXT, micErrorOf } from './audio/listener';
 import { Modem } from './audio/modem';
 import { play } from './audio/player';
@@ -10,12 +11,22 @@ import { captionFor, fairNote, STATIC_DRAWING_NOTE, STATIC_TEXT_NOTE } from './g
 import { MATCH_ROUNDS } from './game/match';
 import { NOISE_INFO } from './game/noise';
 import { CATEGORIES, categoryOf } from './game/words';
+import { callWindowMs } from './game/schedule';
 import {
+  ackPacket,
   addAirtime,
   askFor,
+  askToJoin,
   autoAnswer,
+  awaitingAcks,
   awardOptions,
+  callPacket,
   canRelay,
+  helloPacket,
+  openLobby,
+  readyStatus,
+  resendResults,
+  roster,
   chain,
   chosenWord,
   clueFor,
@@ -23,6 +34,7 @@ import {
   entryAt,
   initialState,
   knownMissed,
+  knownNames,
   leaveGame,
   loadState,
   matchOver,
@@ -59,7 +71,7 @@ import {
 } from './game/telephone';
 import { isOfflineReady, prepareOffline, registerServiceWorker } from './offline/offline';
 import { type Grid } from './protocol/drawing';
-import { cleanName, cleanText, decodePacket, describePacket, DRAW_SIZE, isDrawingStep, type FinalGuess, type GameMode, type NoiseLevel, type Packet } from './protocol/packet';
+import { cleanName, cleanText, decodePacket, describePacket, DRAW_SIZE, isDrawingStep, NEED_START, type FinalGuess, type GameMode, type NoiseLevel, type Packet } from './protocol/packet';
 import { SendGate } from './state/sender';
 import { DrawingEditor } from './ui/editor';
 import { renderGrid } from './ui/grid';
@@ -85,7 +97,7 @@ const AUDIO_TIMEOUT_MS = 10_000;
 const ANSWER_DELAY_MS = 900;
 const SHOW_STEP_MS = 2600;
 const IN_GAME: Phase[] = ['ready', 'my-turn', 'waiting', 'sent', 'missing', 'ready-to-reveal'];
-const LISTEN_PHASES: Phase[] = ['ready', 'waiting', 'sent', 'missing'];
+const LISTEN_PHASES: Phase[] = ['ready', 'waiting', 'sent', 'missing', 'host-setup'];
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const show = (id: string, visible: boolean) => ($(id).hidden = !visible);
@@ -112,6 +124,11 @@ let roomGuess: FinalGuess = 0;
 let roomAnswerShown = false;
 let formFor = -1;
 let relayOffer: { gameId: number; step: number } | null = null;
+/** A round this ready player heard but isn't in (it missed the start signal). */
+let missedStart: number | null = null;
+/** Host: listening for answers to a ready check until this time. */
+let checkUntil = 0;
+let checkTimer: number | undefined;
 const answeredAt = new Map<string, number>();
 let currentPrimary: (() => Promise<void> | void) | null = null;
 let currentSecondary: (() => Promise<void> | void) | null = null;
@@ -158,10 +175,18 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> = {}) => Object.assign(document.createElement(tag), props);
 
 const myName = () => cleanName(state.profile.name) ?? '';
+/** A seat's name from this round, or from earlier rounds and the ready check; null if unknown. */
+const nameFor = (g: Game, seat: number) => nameOfSeat(g, seat, myName()) ?? knownNames(state)[String(seat)] ?? null;
 /** Name of the author of a step (or "Seat n" if this device doesn't know it yet). */
 function who(g: Game, step: number): string {
   const seat = seatOfStep(g, step);
-  return nameOfSeat(g, seat, myName()) ?? `Seat ${seat}`;
+  return nameFor(g, seat) ?? `Seat ${seat}`;
+}
+/** "Bo (seat 2)" when the name is known, just "Seat 2" when it isn't. */
+function whoWithSeat(g: Game, step: number): string {
+  const seat = seatOfStep(g, step);
+  const name = nameFor(g, seat);
+  return name ? `${name} (seat ${seat})` : `Seat ${seat}`;
 }
 const verb = (step: number, done: boolean) => (isDrawingStep(step) ? (done ? 'drew' : 'drawing') : done ? 'guessed' : 'guessing');
 const hopName = (k: number) => (isDrawingStep(k) ? 'drawing' : 'guess');
@@ -266,7 +291,8 @@ function renderLobby() {
   ($('choose-join') as HTMLButtonElement).disabled = !ok;
   radios(
     $('seats'),
-    Array.from({ length: PLAYERS_MAX - 1 }, (_, i) => ({ value: i + 2, name: String(i + 2) })),
+    // Styled like a phone keypad (2 ABC, 3 DEF, …); the accessible name stays "Seat N".
+    Array.from({ length: PLAYERS_MAX - 1 }, (_, i) => ({ value: i + 2, name: String(i + 2), blurb: ['ABC', 'DEF', 'GHI', 'JKL', 'MNO', 'PQRS', 'TUV'][i] })),
     chosenSeat,
     (n) => (chosenSeat = n),
   );
@@ -279,7 +305,7 @@ function renderHost() {
     $('modes'),
     [
       { value: 'quick', name: 'Quick Round', icon: '⚡', blurb: 'one chain, about 5 minutes' },
-      { value: 'match', name: 'Party Match', icon: '🏆', blurb: '3 rounds with running totals' },
+      { value: 'match', name: 'Party Match', icon: '🏆', blurb: '3 rounds, a new first drawer each round, running totals' },
     ],
     hostMode,
     (m) => (hostMode = m),
@@ -300,9 +326,43 @@ function renderHost() {
   $('fair-note').textContent = fairNote(hostPlayers, hostMode);
   ($('players-minus') as HTMLButtonElement).disabled = hostPlayers <= PLAYERS_MIN;
   ($('players-plus') as HTMLButtonElement).disabled = hostPlayers >= PLAYERS_MAX;
+  const cat = categoryOf(hostCategory);
+  $('customize-summary').textContent = `Customize · ${NOISE_INFO[hostNoise].icon} ${NOISE_INFO[hostNoise].name} · ${cat.icon} ${cat.name}`;
+
+  // Who's ready (R9): only phones whose ready message arrived count.
+  const r = roster(state, hostPlayers);
+  $('roster').replaceChildren(
+    ...r.seats.map((x) => {
+      const li = el('li', { className: x.status });
+      let text = '';
+      if (x.status === 'host') text = `${x.names[0]} (you, host)`;
+      else if (x.status === 'ready') text = x.names[0];
+      else if (x.status === 'missing') text = 'not ready yet';
+      else if (x.status === 'duplicate') text = `${x.names.join(' and ')} both picked it`;
+      else text = `${x.names[0]} (outside a ${hostPlayers}-player game)`;
+      const mark = { host: '☎️', ready: '✓', missing: '…', duplicate: '⚠', extra: '⚠' }[x.status];
+      li.append(el('span', { className: 'seat', textContent: `Seat ${x.seat}` }), el('span', { textContent: text }), el('span', { className: 'mark', textContent: mark }));
+      return li;
+    }),
+  );
+  const listeningForAnswers = performance.now() < checkUntil;
+  let note: string;
+  if (listeningForAnswers) note = 'Listening for answers. Players answer one at a time.';
+  else if (r.duplicate.length) note = `Two phones picked seat ${r.duplicate[0]}: one of them taps Change my seat. Then tap Check who's ready again.`;
+  else if (r.missing.length) note = `Waiting for seat ${r.missing.join(', ')}. They tap I'm ready and allow the microphone. Then tap Check who's ready.`;
+  else if (r.extra.length) note = `Seat ${r.extra.join(', ')} is outside this game. Raise the player count, or ask them to pick a lower seat.`;
+  else note = 'Everyone is ready.';
+  $('roster-note').textContent = note;
+  ($('check') as HTMLButtonElement).disabled = gate.busy || listeningForAnswers;
+
   const start = $<HTMLButtonElement>('start');
-  start.disabled = gate.busy;
-  start.textContent = `Start a ${hostPlayers}-player ${hostMode === 'match' ? 'Party Match' : 'Quick Round'}`;
+  const modeName = hostMode === 'match' ? 'Party Match' : 'Quick Round';
+  start.disabled = gate.busy || !r.canStart;
+  start.textContent = r.canStart
+    ? `Start ${modeName} · ${hostPlayers} players`
+    : r.duplicate.some((k) => k <= hostPlayers)
+      ? `Fix seat ${r.duplicate[0]} first`
+      : `Waiting for seat ${r.missing[0]}`;
 }
 
 function renderLine(g: Game | null) {
@@ -324,7 +384,13 @@ function renderLine(g: Game | null) {
       const li = el('li');
       li.className = [done ? 'done' : '', k === now ? 'now' : '', k === me ? 'me' : '', missed.includes(k) ? 'missed' : ''].join(' ').trim();
       const left = el('span');
-      left.append(`${k}. ${who(g, k)}${k === me ? ' (you)' : ''}`, el('small', { className: 'sub', textContent: `seat ${seat} · ${isDrawingStep(k) ? 'draws' : 'guesses'}` }));
+      // The wire shows the order; each row reads "name, then seat · hop · role" without repeating the seat.
+      const known = nameFor(g, seat) !== null;
+      const role = isDrawingStep(k) ? 'draws' : 'guesses';
+      left.append(
+        `${who(g, k)}${k === me ? ' (you)' : ''}`,
+        el('small', { className: 'sub', textContent: known ? `seat ${seat} · hop ${k} · ${role}` : `hop ${k} · ${role}` }),
+      );
       let st = '';
       if (done && k === me) st = confirmedHop(g, k) ? '✓ received' : '♪ played';
       else if (done) st = `✓ ${verb(k, true)}`;
@@ -358,14 +424,34 @@ function renderGame(phase: Phase) {
   let guessing = false;
   let wordBox = false;
   let roomBox = false;
+  let bigClue = '';
 
+  const checks: [boolean | null, string][] = [];
   if (phase === 'ready' || !g) {
     const seat = state.profile.seat ?? 0;
+    const rs = readyStatus(state);
+    const micOk = audioState === 'listening' || audioState === 'playing';
     step = `Seat ${seat}`;
-    title = 'Waiting for the host to start';
-    text = `Keep listening. When the host presses Start, this device joins automatically as seat ${seat}.`;
-    wait = 'Listening for the start signal…';
-    secondary = {
+    title = rs.confirmed ? `You're in, seat ${seat}!` : 'Getting ready';
+    text = rs.confirmed
+      ? `${rs.host}'s phone confirmed you. Keep listening: you join when the host starts.`
+      : 'Your phone counts as ready once the host’s phone hears your ready message.';
+    const micStarting = audioState === 'starting' || audioState === 'mic';
+    checks.push(
+      micOk ? [true, 'Microphone works'] : micStarting ? [null, 'Starting the microphone…'] : [false, audioState === 'error' ? `Microphone problem: ${audioError}` : 'Microphone is off: tap Start listening'],
+    );
+    checks.push([rs.helloSent || null, rs.helloSent ? 'Ready message played' : 'Ready message not sent yet']);
+    checks.push([rs.confirmed || null, rs.confirmed ? `Confirmed by ${rs.host} as seat ${seat}` : "Not confirmed yet: the host taps Check who's ready"]);
+    if (rs.duplicate || rs.clash.length) checks.push([false, `${rs.clash.length ? rs.clash.join(' and ') : 'Another phone'} also picked seat ${seat}. One of you: tap Change my seat.`]);
+    if (rs.seatTooHigh) checks.push([false, `${rs.host}'s game has ${rs.seatTooHigh} seats. Tap Change my seat and pick 2 to ${rs.seatTooHigh}.`]);
+    if (missedStart !== null) {
+      title = 'A round started without you';
+      text = 'Your phone heard a turn from a round it isn’t in. Ask the host’s phone for the start signal.';
+      primary = { label: '📣 Ask to join this round', run: onAskToJoin };
+    } else if (micOk) {
+      secondary = { label: rs.helloSent ? '↻ Send my ready message again' : '📣 Send my ready message', run: onHello };
+    }
+    tertiary = {
       label: 'Change my seat',
       run: () => {
         joinScreen = true;
@@ -387,12 +473,14 @@ function renderGame(phase: Phase) {
         drawing = true;
         const word = chosenWord(g);
         const empty = editor?.empty ?? true;
+        bigClue = `Your word: ${(word ?? '—').toUpperCase()}`;
         primary = { label: !word ? 'Word must be 1–12 letters' : empty ? 'Draw something first' : 'Send my drawing', disabled: !word || empty, run: onSendDrawing };
       } else if (p.kind === 'text') {
         title = `Draw what ${p.from} guessed`;
         text = 'No letters or numbers, just a drawing!';
         promptText = p.text;
         if (p.altered) staticNote = STATIC_TEXT_NOTE;
+        bigClue = `Draw: “${p.text.toUpperCase()}”`;
         drawing = true;
         const empty = editor?.empty ?? true;
         primary = { label: empty ? 'Draw something first' : 'Send my drawing', disabled: empty, run: onSendDrawing };
@@ -408,7 +496,7 @@ function renderGame(phase: Phase) {
     } else if (phase === 'waiting') {
       const prev = me - 1;
       const now = currentStep(g) ?? prev;
-      title = `Waiting for ${who(g, prev)} (seat ${seatOfStep(g, prev)})`;
+      title = `Waiting for ${whoWithSeat(g, prev)}`;
       text = now < prev ? `Right now, ${who(g, now)} is ${verb(now, false)}. Your turn is hop ${me}.` : `${who(g, prev)} is ${verb(prev, false)}. You're next.`;
       wait = `If ${who(g, prev)} already sent, tap Ask for it by sound.`;
       secondary = { label: '📣 Ask for it by sound', run: () => onAsk(prev) };
@@ -477,28 +565,42 @@ function renderGame(phase: Phase) {
 
   renderRoomBox(roomBox ? g : null);
 
+  show('checks', checks.length > 0);
+  $('checks').replaceChildren(
+    ...checks.map(([ok, label]) => el('li', { className: ok === true ? 'ok' : ok === false ? 'bad' : 'wait', textContent: `${ok === true ? '✓' : ok === false ? '⚠' : '…'} ${label}` })),
+  );
+
   show('draw-box', drawing);
+  if (!drawing) bigCanvas = false;
+  document.body.classList.toggle('is-drawing', drawing);
+  document.body.classList.toggle('canvas-open', drawing && bigCanvas);
+  $('draw-box').classList.toggle('big', drawing && bigCanvas);
   if (drawing && g && editor) {
     const key = `${g.gameId}:${myStep(g)}`;
     if (draftFor !== key) {
       draftFor = key;
       editor.reset();
     }
-    pressed('tool-pen', editor.tool === 'pen');
-    pressed('tool-eraser', editor.tool === 'eraser');
     pressed('brush-small', editor.brush === 'small');
     pressed('brush-large', editor.brush === 'large');
-    pressed('bigger', bigCanvas);
+    const bigger = $('bigger');
+    bigger.textContent = bigCanvas ? '✓ Done' : '⤢ Bigger canvas';
+    bigger.setAttribute('aria-label', bigCanvas ? 'Done: back to the normal view' : 'Bigger canvas');
+    bigger.setAttribute('aria-expanded', String(bigCanvas));
     ($('undo') as HTMLButtonElement).disabled = !editor.canUndo;
     ($('redo') as HTMLButtonElement).disabled = !editor.canRedo;
     ($('clear') as HTMLButtonElement).disabled = editor.empty;
-    $('draw-box').classList.toggle('big', bigCanvas);
+    $('big-clue').textContent = bigClue;
+    $('big-audio').textContent = audioState === 'listening' ? '● Listening' : audioState === 'playing' ? '🔊 Playing' : audioState === 'error' ? '⚠ Sound problem' : '○ Mic off';
   }
   show('guess-box', guessing);
 
   currentPrimary = setAction('primary', primary);
   currentSecondary = setAction('secondary', secondary);
   currentTertiary = setAction('tertiary', tertiary);
+  // The full-screen canvas has its own send button, so the action is always in reach.
+  setAction('big-send', drawing && primary ? primary : null);
+  if (!(drawing && bigCanvas)) $('big-send').hidden = true;
 }
 
 /** Odd player counts: the host shows the last drawing and the room guesses it out loud. */
@@ -540,7 +642,10 @@ function renderRecovery(phase: Phase) {
       add('The host pressed Reveal but nothing happened here?', 'Ask for the reveal', () => onAsk(0));
     }
     if (g.seat !== 1 && g.revealed && !g.results && revealShown >= chain(g).cards.length) {
-      add('The host sent the awards but they are not showing?', 'Ask for the awards', () => onAsk(0));
+      add('The host sent the results but they are not showing?', 'Ask for the results', () => onAsk(0));
+    }
+    if (g.revealed && missedStart !== null && missedStart !== g.gameId) {
+      add('A new round started without you.', '📣 Ask to join', onAskToJoin);
     }
     if (relayOffer && relayOffer.gameId === g.gameId && canRelay(state, relayOffer.step)) {
       relay = true;
@@ -723,14 +828,37 @@ function renderReveal() {
   }
   $('reveal-result').textContent = result;
 
-  // Awards
+  // One flow on every device (R11): Reveal → Awards (optional) → Results → Next round
+  const waiting = host && g.results ? awaitingAcks(g) : [];
+  const confirmedHere = !host && (g.acks ?? []).includes(g.seat);
+  const stage = !all ? 1 : !g.results ? 2 : host ? (waiting.length ? 3 : 4) : confirmedHere ? 4 : 3;
+  $('flow')
+    .querySelectorAll('li')
+    .forEach((li, i) => {
+      li.className = i + 1 < stage ? 'done' : i + 1 === stage ? 'now' : '';
+      if (i + 1 === stage) li.setAttribute('aria-current', 'step');
+      else li.removeAttribute('aria-current');
+    });
+
   show('results-box', all);
+  show('acks', all && !!g.results);
+  show('resend-results', all && host && !!g.results);
   if (all) {
     if (g.results) {
       $('awards-text').textContent = awardsSummary(g);
       show('results-form', false);
+      if (host) {
+        const confirmed = (g.acks ?? []).map((k) => `${nameOfSeat(g, k, myName()) ?? `seat ${k}`} ✓`);
+        const pending = waiting.map((k) => nameOfSeat(g, k, myName()) ?? `seat ${k}`);
+        $('acks').textContent = pending.length
+          ? `Results sent. ${confirmed.length ? `Confirmed: ${confirmed.join(' · ')}. ` : ''}Waiting for ${pending.join(', ')}.`
+          : '✓ Results sent and confirmed by every phone.';
+        ($('resend-results') as HTMLButtonElement).disabled = gate.busy;
+      } else {
+        $('acks').textContent = confirmedHere ? '✓ Results received. Your phone confirmed them to the host.' : '✓ Results received. Your phone confirms them to the host in a moment…';
+      }
     } else if (host) {
-      $('awards-text').textContent = 'Time for the awards! Each one is worth 1 point.';
+      $('awards-text').textContent = 'Awards are optional. Each one is worth 1 point.';
       show('results-form', true);
       const o = awardOptions(g);
       if (formFor !== g.gameId) {
@@ -738,13 +866,18 @@ function renderReveal() {
         fillSelect($('aw-funniest') as HTMLSelectElement, o.funniest, g);
         fillSelect($('aw-recognizable') as HTMLSelectElement, o.recognizable, g);
         fillSelect($('aw-recovery') as HTMLSelectElement, o.recovery, g);
-        ($('aw-final') as HTMLSelectElement).value = String(roomFor === g.gameId ? roomGuess : 0);
+        ($('aw-final') as HTMLSelectElement).value = roomFor === g.gameId && roomGuess ? String(roomGuess) : '';
       }
       show('aw-recovery-box', o.recovery.length > 0);
       show('aw-final-box', o.finalGuess);
-      ($('send-results') as HTMLButtonElement).disabled = gate.busy;
+      const v = (id: string) => Number(($(id) as HTMLSelectElement).value) || 0;
+      const picked = v('aw-funniest') + v('aw-recognizable') + (o.recovery.length ? v('aw-recovery') : 0) > 0;
+      const needGuess = o.finalGuess && ($('aw-final') as HTMLSelectElement).value === '';
+      const send = $<HTMLButtonElement>('send-results');
+      send.disabled = gate.busy || needGuess;
+      send.textContent = needGuess ? 'Answer the room guess first' : picked ? 'Send results' : 'Send results (no awards)';
     } else {
-      $('awards-text').textContent = 'Vote out loud for the awards! The host records the winners and chirps them to every phone. Keep listening.';
+      $('awards-text').textContent = 'Vote out loud for the awards! The host sends the results to every phone. Keep listening.';
       show('results-form', false);
     }
   }
@@ -804,23 +937,39 @@ function renderReveal() {
   let note = '';
   let disabled = false;
   againRun = null;
+  const pendingNames = waiting.map((k) => nameOfSeat(g, k, myName()) ?? `seat ${k}`);
+  /** The next round retires this one, so continuing without every confirmation is a deliberate choice. */
+  const guarded = (run: () => Promise<void> | void) => () => {
+    if (pendingNames.length && !confirm(`${pendingNames.join(', ')} hasn't confirmed the results yet. Continue anyway? Their phone may show different scores.`)) return;
+    return run();
+  };
   if (g.mode === 'match' && !over) {
     if (host) {
       label = `▶ Start round ${g.round + 1} of ${MATCH_ROUNDS}`;
       disabled = !g.results;
-      note = g.results ? 'Players join automatically. The first drawer moves one seat.' : 'Send the awards first, so every phone has the same scores.';
-      againRun = onNextRound;
+      note = !g.results ? 'Send the results first, so every phone has the same scores.' : pendingNames.length ? 'Waiting for confirmations. Send results again, or continue anyway.' : 'Players join automatically. The first drawer moves one seat.';
+      againRun = guarded(onNextRound);
     } else {
-      note = `Stay on this screen and keep listening. You join round ${g.round + 1} automatically when the host starts it.`;
+      note = g.results ? `Waiting for the host to start round ${g.round + 1}. You join automatically.` : 'Waiting for the host to send the results.';
     }
   } else if (over) {
     label = host ? '☎️ Start a new game' : '📻 Ready for a new game';
-    note = host ? 'Ask everyone to press "Ready for a new game" first.' : 'The host starts the next game. Your device joins automatically.';
-    againRun = () => onAgain(true);
+    disabled = host && !g.results;
+    note = host ? (g.results ? 'Ask everyone to press "Ready for a new game" first.' : 'Send the results first.') : 'The host starts the next game. Your device joins automatically.';
+    againRun = host ? guarded(() => onAgain(true)) : () => onAgain(true);
   } else {
     label = host ? '☎️ Host another round' : '📻 Ready for the next round';
-    note = host ? 'Players on this screen join your next round automatically.' : 'You also join automatically if the host starts while you are on this screen.';
-    againRun = () => onAgain(false);
+    disabled = host && !g.results;
+    note = host
+      ? !g.results
+        ? 'Send the results first, so every phone has the same scores.'
+        : pendingNames.length
+          ? 'Waiting for confirmations. Send results again, or continue anyway.'
+          : 'Players on this screen join your next round automatically.'
+      : g.results
+        ? 'Waiting for the host. You also join automatically if the host starts while you are on this screen.'
+        : 'Waiting for the host to send the results.';
+    againRun = host ? guarded(() => onAgain(false)) : () => onAgain(false);
   }
   again.hidden = !againRun;
   again.textContent = label;
@@ -938,7 +1087,7 @@ function playFx(list: Effect[]) {
  * Play the chirp, then commit. Nothing is committed if playback fails. The
  * dial-up handshake only plays before a fresh start signal (R4.1).
  */
-async function playOut(out: { state: State; bytes: Uint8Array }, label: string, after: string, opts: { resend?: boolean } = {}): Promise<boolean> {
+async function playOut(out: { state: State; bytes: Uint8Array }, label: string, after: string, opts: { resend?: boolean; scheduled?: boolean } = {}): Promise<boolean> {
   if (gate.busy) return false;
   let audio;
   try {
@@ -947,7 +1096,8 @@ async function playOut(out: { state: State; bytes: Uint8Array }, label: string, 
     audioFailed(err);
     return false;
   }
-  await effectsDone();
+  // A scheduled reply must start in its own slot; no effects play on those events anyway.
+  if (!opts.scheduled) await effectsDone();
   stopListening(false);
   const decoded = decodePacket(out.bytes);
   const type = decoded.ok ? decoded.packet.type : 'unknown';
@@ -986,6 +1136,22 @@ async function send(out: Outgoing | null, label: string, after: string, opts: { 
   return out ? playOut(out, label, after, opts) : false;
 }
 
+/**
+ * Play an automatic reply in this phone's time slot (see src/game/schedule.ts).
+ * If the phone is busy when its slot comes, the reply is skipped rather than
+ * delayed into someone else's slot; the asker can simply ask again.
+ */
+function replyInSlot(delayMs: number, build: () => Outgoing | null, label: string, after: string) {
+  window.setTimeout(() => {
+    if (gate.busy || audioState === 'playing') {
+      setStatus('This phone was busy when its turn to answer came. Ask the host to check again.');
+      return;
+    }
+    const out = build();
+    if (out) void playOut(out, label, after, { resend: true, scheduled: true });
+  }, delayMs);
+}
+
 // ---------------------------------------------------------------- receiving
 
 function eventMessage(e: ReceiveEvent): [string, Tone, Effect[]] | null {
@@ -1016,8 +1182,24 @@ function eventMessage(e: ReceiveEvent): [string, Tone, Effect[]] | null {
     }
     case 'revealed':
       return ['The reveal is here! Show the chain one hop at a time.', 'ok', ['success']];
+    // No effects on events that schedule replies: a jingle could cover someone's reply chirp.
     case 'results':
-      return ['Awards are in! Scores updated on this phone.', 'ok', ['success']];
+      if (e.again) return ['Heard the results again. Nothing changed. This phone confirms again in its turn.', 'info', []];
+      return [`Results are in! Scores updated.${e.ackIn !== null ? ' Your phone confirms them to the host in its turn.' : ''}`, 'ok', []];
+    case 'call':
+      if (e.duplicate) return [`⚠ Two phones picked seat ${state.profile.seat}. One of you: tap Change my seat.`, 'error', []];
+      if (e.confirmed) return [`✓ ${e.host}'s phone confirmed you as seat ${state.profile.seat}. Wait for the start.`, 'ok', []];
+      if (e.seatTooHigh) return [`${e.host}'s game has ${e.players} seats. Tap Change my seat and pick 2 to ${e.players}.`, 'error', []];
+      return [`${e.host} is checking who's ready. Your phone answers in about ${Math.round((e.replyIn ?? 0) / 1000)} s.`, 'info', []];
+    case 'hello':
+      if (state.profile.mode === 'host') {
+        return e.clash ? [`⚠ Two phones say they are seat ${e.seat}. One of them should change seat.`, 'error', []] : [`✓ ${e.name} is ready (seat ${e.seat}).`, 'ok', []];
+      }
+      return e.clash ? [`⚠ ${e.name} also picked seat ${e.seat}. One of you: tap Change my seat.`, 'error', []] : null;
+    case 'ack':
+      return [`✓ Seat ${e.seat} confirmed the results.`, 'ok', []];
+    case 'missed-start':
+      return ['A round started without you. Tap Ask to join.', 'error', []];
     case 'need':
       return null; // handled in onDecoded
     case 'other-game':
@@ -1045,7 +1227,13 @@ function scheduleAnswer(step: number): boolean {
   const now = performance.now();
   if (now - (answeredAt.get(key) ?? -Infinity) < 4000) return true;
   answeredAt.set(key, now);
-  setStatus(step === 0 ? 'Someone missed the reveal. This phone sends it again in a moment…' : 'Someone missed your turn. This phone plays it again in a moment…');
+  setStatus(
+    step === NEED_START
+      ? 'A late player asked to join. This phone sends the start signal in a moment…'
+      : step === 0
+        ? 'Someone missed the reveal or the results. This phone sends them again in a moment…'
+        : 'Someone missed your turn. This phone plays it again in a moment…',
+  );
   window.setTimeout(() => void answerNow(packets, 0), ANSWER_DELAY_MS);
   return true;
 }
@@ -1057,7 +1245,7 @@ async function answerNow(packets: Packet[], tries: number) {
   }
   for (const p of packets) {
     if (state.game?.gameId !== p.gameId) return;
-    const label = p.type === 'entry' ? 'your turn again' : p.type === 'reveal' ? 'the reveal again' : 'the awards again';
+    const label = p.type === 'entry' ? 'your turn again' : p.type === 'reveal' ? 'the reveal again' : p.type === 'start' ? 'the start signal again' : 'the results again';
     if (!(await playOut(outgoingFor(state, p), label, 'Listening…', { resend: true }))) return;
   }
 }
@@ -1084,9 +1272,18 @@ function onDecoded(bytes: Uint8Array) {
     stopShow();
     revealShown = 1;
     relayOffer = null;
+    missedStart = null;
     ($('guess') as HTMLInputElement).value = '';
   }
+  if (event.type === 'missed-start') missedStart = event.gameId;
   if (next !== state) commit(next);
+  // Automatic replies, each in this seat's own time slot.
+  if (event.type === 'call' && event.replyIn !== null) {
+    replyInSlot(event.replyIn, () => helloPacket(state), 'your ready message', "The host's screen shows it when it arrives.");
+  }
+  if (event.type === 'results' && event.ackIn !== null) {
+    replyInSlot(event.ackIn, () => ackPacket(state), 'your results confirmation', 'Listening…');
+  }
   if (event.type === 'need') {
     if (!scheduleAnswer(event.step)) {
       if (canRelay(state, event.step)) {
@@ -1120,7 +1317,31 @@ function resetRoundUi() {
 async function onStart() {
   const out = startGame(state, { players: hostPlayers, gameId: randomU16(), now: Date.now(), noise: hostNoise, mode: hostMode, category: hostCategory });
   resetRoundUi();
-  await send(out, 'the start signal', 'Players who were ready have joined. Now pick your word and draw it!');
+  // "Played" is all the host knows: a phone joins when it hears the start, and the line shows ✓ as turns arrive.
+  await send(out, 'the start signal', 'Each phone joins when it hears it. Now pick your word and draw it!');
+}
+
+async function onHello() {
+  await send(helloPacket(state), 'your ready message', "The host's screen shows it when it arrives.", { resend: true });
+}
+
+async function onCheck() {
+  const out = callPacket(state, hostPlayers);
+  if (!out || out.packet.type !== 'call') return;
+  const { confirmed, duplicate } = out.packet;
+  if (await send(out, "the ready check", 'Players who are not confirmed answer one at a time.', { resend: true })) {
+    checkUntil = performance.now() + callWindowMs(confirmed, duplicate);
+    window.clearTimeout(checkTimer);
+    checkTimer = window.setTimeout(() => render(), checkUntil - performance.now() + 50);
+    render();
+  }
+}
+
+async function onAskToJoin() {
+  const id = missedStart;
+  if (id === null) return;
+  if (await send(askToJoin(state, id), 'a request to join', "The host's phone sends the start signal in a moment.", { resend: true })) missedStart = null;
+  render();
 }
 
 async function onNextRound() {
@@ -1217,10 +1438,15 @@ editor = new DrawingEditor(
 $<HTMLInputElement>('name').addEventListener('input', (e) => {
   commit(setProfile(state, { name: (e.target as HTMLInputElement).value }));
 });
-$('choose-host').addEventListener('click', () => {
-  commit(setProfile(state, { mode: 'host', seat: 1 }));
-  setStatus('Choose the game, the players, the line, and a prompt category. Then start.');
-});
+$('choose-host').addEventListener(
+  'click',
+  guard(async () => {
+    commit(openLobby(setProfile(state, { mode: 'host', seat: 1 }), randomU16()));
+    setStatus("Players tap Join and I'm ready. Their names appear here when their phone's ready message arrives.");
+    // This click is the user gesture that lets the microphone start (needed on iPhone).
+    await startListening(false);
+  }),
+);
 $('choose-join').addEventListener('click', () => {
   joinScreen = true;
   render();
@@ -1235,10 +1461,14 @@ $('ready').addEventListener(
   guard(async () => {
     joinScreen = false;
     commit(setProfile(state, { mode: 'player', seat: chosenSeat }));
-    setStatus(`You are seat ${chosenSeat}. Waiting for the host to start.`);
+    setStatus(`You are seat ${chosenSeat}. Starting the microphone…`);
     await startListening(false);
+    // Ready means the microphone works AND the host hears us (R9.1): only now say hello.
+    if (audioState !== 'listening') return;
+    await onHello();
   }),
 );
+$('check').addEventListener('click', guard(onCheck));
 $('players-minus').addEventListener('click', () => {
   hostPlayers = Math.max(PLAYERS_MIN, hostPlayers - 1);
   render();
@@ -1258,18 +1488,22 @@ $('reroll').addEventListener('click', () => {
 });
 $('custom-word').addEventListener('input', (e) => commit(setWordDraft(state, { custom: (e.target as HTMLInputElement).value })));
 
-// Drawing tools
-$('tool-pen').addEventListener('click', () => editor?.setTool('pen'));
-$('tool-eraser').addEventListener('click', () => editor?.setTool('eraser'));
+// Drawing tools (no pen/eraser: the square where a stroke starts decides)
 $('brush-small').addEventListener('click', () => editor?.setBrush('small'));
 $('brush-large').addEventListener('click', () => editor?.setBrush('large'));
 $('undo').addEventListener('click', () => editor?.undo());
 $('redo').addEventListener('click', () => editor?.redo());
 $('clear').addEventListener('click', () => editor?.clear());
-$('bigger').addEventListener('click', () => {
-  bigCanvas = !bigCanvas;
+function setBigCanvas(open: boolean) {
+  bigCanvas = open;
   render();
-  $('editor').scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+  if (!open) $('draw-box').scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+  $('bigger').focus();
+}
+$('bigger').addEventListener('click', () => setBigCanvas(!bigCanvas));
+$('big-send').addEventListener('click', guard(() => currentPrimary?.()));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && bigCanvas) setBigCanvas(false);
 });
 
 $('guess').addEventListener('input', () => render());
@@ -1324,6 +1558,8 @@ $('results-form').addEventListener(
     )();
   },
 );
+$('results-form').addEventListener('change', () => render());
+$('resend-results').addEventListener('click', guard(() => send(resendResults(state), 'the results again', 'Phones that missed them confirm in turn.', { resend: true })));
 $('again').addEventListener('click', guard(() => againRun?.()));
 
 // Sound and settings
@@ -1406,6 +1642,9 @@ if (IN_GAME.includes(bootPhase)) {
 } else if (bootPhase === 'reveal') {
   revealShown = 99;
   setStatus('Here is the last reveal.');
+} else if (bootPhase === 'host-setup') {
+  resumeNeeded = true;
+  setStatus("Tap Resume listening so this phone can hear players' ready messages.");
 } else {
   setStatus('Enter your name, then host or join a game.');
 }

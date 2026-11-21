@@ -361,10 +361,7 @@ button:disabled {
     gap: 1rem;
     align-items: start;
   }
-  .line-panel {
-    position: sticky;
-    top: 7rem;
-  }
+  /* Not sticky: a sticky panel drifted away from the task and over the text below it. */
 }
 .step {
   color: var(--violet);
@@ -683,7 +680,7 @@ dt {
   color: var(--amber);
   text-align: center;
 }
-button[aria-pressed='true'] {
+button:not(.cell)[aria-pressed='true'] {
   border: 2px solid var(--phosphor);
   box-shadow: 0 0 10px rgba(124, 247, 160, 0.35);
 }
@@ -698,12 +695,198 @@ button[aria-pressed='true'] {
 .toolbar button {
   flex: 1 1 5.5rem;
 }
+.draw-hint {
+  text-align: center;
+  font-weight: 600;
+  margin: 0.3rem 0;
+}
+.tool-extra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+.tool-extra button {
+  min-height: 40px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+}
+.draw-head,
+.big-send {
+  display: none;
+}
+
+/* Full-screen drawing view: nothing covers the squares, and the actions stay in reach. */
+.draw-box.big {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  margin: 0;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: max(0.5rem, env(safe-area-inset-top)) 0.5rem max(0.5rem, env(safe-area-inset-bottom));
+  overflow-y: auto;
+}
+.draw-box.big .draw-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  width: min(100%, 44rem);
+}
+.draw-box.big .toolbar,
+.draw-box.big .big-send {
+  width: min(100%, 44rem);
+  margin: 0;
+}
+.draw-box.big .big-send:not([hidden]) {
+  display: block;
+  flex: none;
+}
 .draw-box.big .editor.grid {
-  width: min(calc(100vw - 1rem), 40rem);
-  max-width: none;
-  margin-left: 50%;
-  transform: translateX(-50%);
-  gap: 1px !important;
+  width: min(calc(100vw - 1rem), calc(100vh - 17rem), 44rem);
+  width: min(calc(100vw - 1rem), calc(100dvh - 17rem), 44rem);
+  margin: 0;
+  flex: none;
+}
+.draw-box.big .kbd-hint {
+  display: none;
+}
+.big-clue {
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+  font-weight: 700;
+  color: var(--amber);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-audio {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+body.canvas-open {
+  overflow: hidden;
+}
+/* While drawing, the sound bar is compact and not sticky, so it never covers squares. */
+body.is-drawing .statusbar {
+  position: static;
+  grid-template-columns: 1fr;
+  gap: 0.25rem;
+  padding: 0.35rem 0.5rem;
+}
+@media (min-width: 600px) {
+  body.is-drawing .statusbar {
+    grid-template-columns: 1fr auto;
+    align-items: center;
+  }
+}
+body.is-drawing .statusbar .scope {
+  display: none;
+}
+body.is-drawing .sound-actions button {
+  min-height: 40px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.85rem;
+  flex: 0 1 auto;
+}
+
+/* ---------- ready check, flow ---------- */
+.customize {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.5rem 0.8rem;
+  margin: 0.8rem 0;
+}
+.customize summary {
+  cursor: pointer;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-weight: 600;
+}
+.roster,
+.checks {
+  list-style: none;
+  padding: 0;
+  margin: 0.3rem 0;
+  display: grid;
+  gap: 0.3rem;
+}
+.roster li {
+  display: grid;
+  grid-template-columns: 4.2rem 1fr auto;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.4rem 0.7rem;
+}
+.roster .seat {
+  color: var(--muted);
+}
+.roster li.ready .mark,
+.roster li.host .mark {
+  color: var(--phosphor);
+}
+.roster li.missing {
+  color: var(--muted);
+  border-style: dashed;
+}
+.roster li.duplicate,
+.roster li.extra {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.checks li.ok {
+  color: var(--phosphor);
+}
+.checks li.bad {
+  color: var(--danger);
+  font-weight: 600;
+}
+.checks li.wait {
+  color: var(--muted);
+}
+.flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0;
+  counter-reset: flow;
+  font-size: 0.8rem;
+}
+.flow li {
+  counter-increment: flow;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  color: var(--muted);
+}
+.flow li::before {
+  content: counter(flow) '. ';
+}
+.flow li.done {
+  color: var(--phosphor);
+}
+.flow li.done::before {
+  content: '✓ ';
+}
+.flow li.now {
+  border-color: var(--amber);
+  color: var(--amber);
+  font-weight: 700;
+}
+.acks {
+  font-weight: 600;
+  color: var(--text);
 }
 
 /* ---------- v3: the line ---------- */

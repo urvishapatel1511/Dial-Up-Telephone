@@ -1,31 +1,24 @@
-import {
-  beginStroke,
-  clearCanvas,
-  endStroke,
-  isEmpty,
-  newCanvas,
-  paint,
-  redo,
-  stamp,
-  undo,
-  type Brush,
-  type Canvas,
-  type Tool,
-} from '../game/canvas';
+import { beginStroke, clearCanvas, endStroke, isEmpty, newCanvas, redo, strokeTo, toggle, undo, type Brush, type Canvas } from '../game/canvas';
 import type { Grid } from '../protocol/drawing';
 
+/** Clicks this soon after a pointer stroke are the browser's synthetic click, not a keyboard action. */
+const CLICK_AFTER_POINTER_MS = 400;
+
 /**
- * The drawing editor: a single-tab-stop grid of buttons (arrow keys, Home/End,
- * Space/Enter to paint, Ctrl+Z / Ctrl+Y), touch and mouse strokes, and a
- * toolbar with explicit tools. Each stroke or key press is one undo step.
+ * The drawing editor. Direct touch: the square where a stroke starts decides
+ * whether it paints or erases (see src/game/canvas.ts). One pointer handler on
+ * the grid serves mouse, touch, and pen alike, with pointer capture so a
+ * release outside the grid still ends the stroke. The grid is a single tab
+ * stop: arrow keys and Home/End move, Space/Enter toggle, Ctrl/Cmd+Z undoes,
+ * Ctrl/Cmd+Shift+Z or Ctrl+Y redoes.
  */
 export class DrawingEditor {
   canvas: Canvas;
-  tool: Tool = 'pen';
   brush: Brush = 'small';
   private cells: HTMLButtonElement[] = [];
   private focusIndex = 0;
-  private stroking = false;
+  private pointerId: number | null = null;
+  private lastPointerEnd = -Infinity;
   private readonly size: number;
 
   constructor(
@@ -36,8 +29,6 @@ export class DrawingEditor {
     this.size = size;
     this.canvas = newCanvas(size);
     this.build();
-    window.addEventListener('pointerup', () => this.finish());
-    window.addEventListener('pointercancel', () => this.finish());
   }
 
   get grid(): Grid {
@@ -52,43 +43,59 @@ export class DrawingEditor {
   get canRedo(): boolean {
     return this.canvas.redo.length > 0;
   }
+  get stroking(): boolean {
+    return this.pointerId !== null;
+  }
 
   reset(): void {
+    this.pointerId = null;
     this.canvas = newCanvas(this.size);
     this.sync();
-  }
-  setTool(t: Tool): void {
-    this.tool = t;
-    this.onChange();
   }
   setBrush(b: Brush): void {
     this.brush = b;
     this.onChange();
   }
   undo(): void {
+    this.endPointer();
     this.canvas = undo(this.canvas);
     this.sync();
   }
   redo(): void {
+    this.endPointer();
     this.canvas = redo(this.canvas);
     this.sync();
   }
   /** Asks first when there is something to lose. */
   clear(confirmFn: (msg: string) => boolean = (m) => window.confirm(m)): void {
     if (this.empty || !confirmFn('Clear your whole drawing? (You can undo this.)')) return;
+    this.endPointer();
     this.canvas = clearCanvas(this.canvas);
     this.sync();
   }
 
   private apply(next: Canvas) {
     if (next === this.canvas) return;
+    const changed = next.grid !== this.canvas.grid;
     this.canvas = next;
-    this.sync();
+    if (changed) this.sync();
   }
 
-  private finish() {
-    if (!this.stroking) return;
-    this.stroking = false;
+  /** Square under a viewport point, or -1 outside the grid. */
+  private cellAt(x: number, y: number): number {
+    const box = this.host.getBoundingClientRect();
+    if (x < box.left || y < box.top || x >= box.right || y >= box.bottom) return -1;
+    const c = Math.min(this.size - 1, Math.floor(((x - box.left) / box.width) * this.size));
+    const r = Math.min(this.size - 1, Math.floor(((y - box.top) / box.height) * this.size));
+    return r * this.size + c;
+  }
+
+  private endPointer() {
+    if (this.pointerId === null) return;
+    const id = this.pointerId;
+    this.pointerId = null;
+    this.lastPointerEnd = performance.now();
+    if (this.host.hasPointerCapture?.(id)) this.host.releasePointerCapture(id);
     this.canvas = endStroke(this.canvas);
     this.onChange();
   }
@@ -100,7 +107,7 @@ export class DrawingEditor {
     host.style.gridTemplateColumns = `repeat(${size}, 1fr)`;
     host.style.gap = '2px';
     host.setAttribute('role', 'group');
-    host.setAttribute('aria-label', 'Your drawing, 16 by 16 squares. Arrow keys move, Space paints with the selected tool.');
+    host.setAttribute('aria-label', 'Your drawing, 16 by 16 squares. Arrow keys move, Space toggles a square.');
     this.cells = [];
     for (let r = 0; r < size; r++) {
       for (let c = 0; c < size; c++) {
@@ -111,43 +118,59 @@ export class DrawingEditor {
         cell.tabIndex = i === 0 ? 0 : -1;
         cell.setAttribute('aria-label', `Row ${r + 1}, column ${c + 1}`);
         cell.setAttribute('aria-pressed', 'false');
-        cell.addEventListener('pointerdown', (e: PointerEvent) => {
-          e.preventDefault();
-          this.moveFocus(i, false);
-          this.stroking = true;
-          this.canvas = beginStroke(this.canvas);
-          this.apply(paint(this.canvas, r, c, this.tool, this.brush));
-        });
-        cell.addEventListener('pointerenter', () => {
-          if (this.stroking) this.apply(paint(this.canvas, r, c, this.tool, this.brush));
-        });
         cell.addEventListener('click', (e: MouseEvent) => {
-          // Enter/Space arrive as a click with detail 0; pointer clicks were handled on pointerdown.
-          if (e.detail === 0) this.apply(stamp(this.canvas, r, c, this.tool, this.brush));
+          // Only keyboard activation (Enter/Space) counts here; pointers were handled on the grid.
+          if (e.detail !== 0 || performance.now() - this.lastPointerEnd < CLICK_AFTER_POINTER_MS) return;
+          this.apply(toggle(this.canvas, r, c, this.brush));
         });
         cell.addEventListener('keydown', (e: KeyboardEvent) => this.key(e, r, c, i));
         this.cells.push(cell);
         host.appendChild(cell);
       }
     }
-    // Touch drag: pointerenter does not fire across elements during touch, so hit-test manually.
-    host.addEventListener('pointermove', (e: PointerEvent) => {
-      if (!this.stroking || e.pointerType === 'mouse') return;
-      const i = this.cells.indexOf(document.elementFromPoint(e.clientX, e.clientY) as HTMLButtonElement);
-      if (i >= 0) this.apply(paint(this.canvas, Math.floor(i / size), i % size, this.tool, this.brush));
+
+    host.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (this.pointerId !== null) return; // a second finger is ignored during a stroke
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      const i = this.cellAt(e.clientX, e.clientY);
+      if (i < 0) return;
+      e.preventDefault();
+      this.pointerId = e.pointerId;
+      try {
+        host.setPointerCapture(e.pointerId);
+      } catch {
+        // Synthetic events in tests may not support capture; the window listeners below still end the stroke.
+      }
+      this.moveFocus(i, false);
+      this.apply(beginStroke(this.canvas, Math.floor(i / size), i % size, this.brush));
     });
+    host.addEventListener('pointermove', (e: PointerEvent) => {
+      if (e.pointerId !== this.pointerId) return;
+      const i = this.cellAt(e.clientX, e.clientY);
+      if (i >= 0) this.apply(strokeTo(this.canvas, Math.floor(i / size), i % size, this.brush));
+    });
+    const end = (e: PointerEvent) => {
+      if (e.pointerId === this.pointerId) this.endPointer();
+    };
+    host.addEventListener('pointerup', end);
+    host.addEventListener('pointercancel', end);
+    host.addEventListener('lostpointercapture', end);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+    window.addEventListener('blur', () => this.endPointer());
     this.sync();
   }
 
   private key(e: KeyboardEvent, r: number, c: number, i: number) {
     const { size } = this;
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) this.redo();
       else this.undo();
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+    if (mod && e.key.toLowerCase() === 'y') {
       e.preventDefault();
       this.redo();
       return;
@@ -173,7 +196,7 @@ export class DrawingEditor {
     if (focus) this.cells[i].focus();
   }
 
-  /** Update every cell from the model. */
+  /** Update every square from the model. */
   private sync() {
     const g = this.canvas.grid;
     this.cells.forEach((cell, i) => {

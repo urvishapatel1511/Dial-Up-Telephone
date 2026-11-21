@@ -5,8 +5,11 @@ import {
   DRAW_SIZE,
   encodePacket,
   isDrawingStep,
+  maskToSeats,
+  NEED_START,
   packetKey,
   PLAYERS_MAX,
+  seatsToMask,
   PLAYERS_MIN,
   ROUNDS_MAX,
   type FinalGuess,
@@ -16,6 +19,7 @@ import {
 } from '../protocol/packet';
 import { offsetFor, seatAt, stepOf } from './match';
 import { noisyDrawing, noisyText } from './noise';
+import { ackDelay, helloDelay } from './schedule';
 import { suggestWord } from './words';
 
 /**
@@ -70,6 +74,8 @@ export interface Game {
   results: Results | null;
   /** Name of another device that sent an entry for this device's step. */
   conflict: string | null;
+  /** Host: seats that confirmed the results. Player: [own seat] once its confirmation played. */
+  acks?: number[];
   startedAt: number;
   revealedAt: number | null;
 }
@@ -94,11 +100,24 @@ export interface Stats {
   airtimeMs: number;
 }
 
+/** The ready check before a round (R9). */
+export interface Lobby {
+  owner: Mode;
+  lobbyId: number;
+  /** Ready messages heard, seat → names. Host: the roster. Player: other phones (for seat clashes). */
+  seats: Record<string, string[]>;
+  /** Player: the host's latest ready check. */
+  call: { host: string; players: number; confirmed: number[]; duplicate: number[] } | null;
+  /** Player: a ready message has played (that is not the same as confirmed). */
+  helloSent: boolean;
+}
+
 export interface State {
   v: 3;
   profile: Profile;
   game: Game | null;
   match: Match | null;
+  lobby: Lobby | null;
   seen: string[];
   sent: string[];
   retired: number[];
@@ -116,8 +135,14 @@ export type ReceiveEvent =
   | { type: 'entry'; step: number; name: string; forMe: boolean; last: boolean; recovered: boolean }
   | { type: 'conflict'; name: string }
   | { type: 'revealed' }
-  | { type: 'results' }
+  /** `again` = a repeat of results already applied (never re-scored). `ackIn` = when this phone confirms. */
+  | { type: 'results'; again: boolean; ackIn: number | null }
   | { type: 'need'; step: number }
+  | { type: 'call'; host: string; players: number; confirmed: boolean; duplicate: boolean; seatTooHigh: boolean; replyIn: number | null }
+  | { type: 'hello'; seat: number; name: string; clash: boolean }
+  | { type: 'ack'; seat: number }
+  /** A ready player heard a turn from a round it isn't in. */
+  | { type: 'missed-start'; gameId: number }
   | { type: 'other-game' }
   | { type: 'stale' }
   | { type: 'duplicate' }
@@ -127,7 +152,7 @@ export type ReceiveEvent =
 const emptyStats = (): Stats => ({ chirpsSent: 0, chirpsHeard: 0, bytesSent: 0, airtimeMs: 0 });
 
 export function initialState(): State {
-  return { v: 3, profile: { name: '', mode: null, seat: null }, game: null, match: null, seen: [], sent: [], retired: [], lastSent: null, stats: emptyStats() };
+  return { v: 3, profile: { name: '', mode: null, seat: null }, game: null, match: null, lobby: null, seen: [], sent: [], retired: [], lastSent: null, stats: emptyStats() };
 }
 
 function pushLimited<T>(list: T[], item: T, limit: number): T[] {
@@ -150,6 +175,17 @@ export function knownMissed(g: Game): number[] {
   let last = 0;
   for (let k = 1; k <= g.players; k++) if (entryAt(g, k)) last = k;
   return missingSteps(g).filter((k) => k < last);
+}
+
+/**
+ * Names this device already learned for seats, from earlier rounds of the
+ * match and from ready messages. Names only: never any entry content.
+ */
+export function knownNames(s: State): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [seat, names] of Object.entries(s.lobby?.seats ?? {})) if (names.length === 1) out[seat] = names[0];
+  for (const r of s.match?.rounds ?? []) Object.assign(out, r.names);
+  return out;
 }
 
 /** Name for a seat, if this device knows it. */
@@ -259,6 +295,7 @@ function newGameFrom(p: Extract<Packet, { type: 'start' }>, seat: number, now: n
     revealed: false,
     results: null,
     conflict: null,
+    acks: [],
     startedAt: now,
     revealedAt: null,
   };
@@ -272,17 +309,153 @@ function archive(match: Match | null, g: Game | null): Match | null {
   return { ...m, rounds: [...m.rounds, summarize(g)] };
 }
 
+// ---- ready check (lobby) -------------------------------------------------------
+
+const newLobby = (owner: Mode, lobbyId: number): Lobby => ({ owner, lobbyId, seats: {}, call: null, helloSent: false });
+
+/** Host: open the ready check (keeps an existing host roster, e.g. between Quick Rounds). */
+export function openLobby(s: State, lobbyId: number): State {
+  return s.lobby?.owner === 'host' ? s : { ...s, lobby: newLobby('host', lobbyId & 0xffff) };
+}
+
+/** Record that `name` is at `seat`, moving it off any other seat (a player who changed seat). */
+function placeName(lobby: Lobby, seat: number, name: string): Lobby {
+  const seats: Record<string, string[]> = {};
+  for (const [k, names] of Object.entries(lobby.seats)) {
+    const rest = names.filter((n) => n !== name);
+    if (rest.length) seats[k] = rest;
+  }
+  seats[String(seat)] = [...(seats[String(seat)] ?? []), name];
+  return { ...lobby, seats };
+}
+
+export interface RosterSeat {
+  seat: number;
+  names: string[];
+  status: 'host' | 'ready' | 'missing' | 'duplicate' | 'extra';
+}
+
+/** Host: who is confirmed for an N-player game. Start needs every seat 2..N confirmed exactly once. */
+export function roster(s: State, players: number): { seats: RosterSeat[]; canStart: boolean; missing: number[]; duplicate: number[]; extra: number[] } {
+  const heard = s.lobby?.owner === 'host' ? s.lobby.seats : {};
+  const top = Math.max(players, ...Object.keys(heard).map(Number).filter((k) => heard[String(k)]?.length));
+  const seats: RosterSeat[] = [];
+  for (let k = 1; k <= top; k++) {
+    if (k === 1) {
+      seats.push({ seat: 1, names: [cleanName(s.profile.name) ?? 'You'], status: 'host' });
+      continue;
+    }
+    const names = heard[String(k)] ?? [];
+    const status: RosterSeat['status'] = names.length > 1 ? 'duplicate' : k > players ? 'extra' : names.length === 1 ? 'ready' : 'missing';
+    if (k <= players || names.length) seats.push({ seat: k, names, status });
+  }
+  const pick = (st: RosterSeat['status']) => seats.filter((x) => x.status === st).map((x) => x.seat);
+  const duplicate = pick('duplicate');
+  const missing = pick('missing');
+  return { seats, missing, duplicate, extra: pick('extra'), canStart: missing.length === 0 && !duplicate.some((k) => k <= players) };
+}
+
+/** Host: the ready-check chirp. Confirmed and duplicated seats stay quiet; everyone else answers in turn. */
+export function callPacket(s: State, players: number): Outgoing | null {
+  const name = cleanName(s.profile.name);
+  const lobby = s.lobby;
+  if (!name || lobby?.owner !== 'host' || players < PLAYERS_MIN || players > PLAYERS_MAX) return null;
+  const r = roster(s, players);
+  const confirmed = [1, ...r.seats.filter((x) => x.status === 'ready' || (x.status === 'extra' && x.names.length === 1)).map((x) => x.seat)];
+  const p: Packet = { type: 'call', gameId: lobby.lobbyId, players, name, confirmed: seatsToMask(confirmed), duplicate: seatsToMask(r.duplicate) };
+  return outgoingFor(s, p, { keepLast: true });
+}
+
+/** Player: "I'm ready" (only played after the microphone started). */
+export function helloPacket(s: State): Outgoing | null {
+  const name = cleanName(s.profile.name);
+  const seat = s.profile.seat;
+  if (s.profile.mode !== 'player' || !name || !seat) return null;
+  const lobby = s.lobby?.owner === 'player' ? s.lobby : newLobby('player', 0);
+  const out = outgoingFor(s, { type: 'hello', gameId: lobby.lobbyId, seat, name }, { keepLast: true });
+  return { ...out, state: { ...out.state, lobby: { ...lobby, helloSent: true } } };
+}
+
+/** Player: what the host's last ready check said about this seat. */
+export function readyStatus(s: State): { helloSent: boolean; confirmed: boolean; duplicate: boolean; clash: string[]; seatTooHigh: number | null; host: string | null } {
+  const lobby = s.lobby?.owner === 'player' ? s.lobby : null;
+  const seat = s.profile.seat ?? 0;
+  const me = cleanName(s.profile.name);
+  const call = lobby?.call ?? null;
+  return {
+    helloSent: !!lobby?.helloSent,
+    confirmed: !!call?.confirmed.includes(seat),
+    duplicate: !!call?.duplicate.includes(seat),
+    clash: (lobby?.seats[String(seat)] ?? []).filter((n) => n !== me),
+    seatTooHigh: call && seat > call.players ? call.players : null,
+    host: call?.host ?? null,
+  };
+}
+
+function receiveLobby(s: State, p: Extract<Packet, { type: 'call' } | { type: 'hello' }>): { state: State; event: ReceiveEvent } {
+  const same = { state: s, event: { type: 'ignored' } as ReceiveEvent };
+  const { mode, seat } = s.profile;
+  const me = cleanName(s.profile.name);
+  if (p.type === 'hello') {
+    if (p.seat === 1) return same;
+    if (mode === 'player' && p.seat === seat && p.name === me) return { state: s, event: { type: 'own-echo' } };
+    if (mode !== 'host' && mode !== 'player') return same;
+    const base = s.lobby ?? newLobby(mode, p.gameId);
+    const already =
+      !!base.seats[String(p.seat)]?.includes(p.name) && Object.entries(base.seats).every(([k, names]) => k === String(p.seat) || !names.includes(p.name));
+    const lobby = already && s.lobby ? s.lobby : placeName(base, p.seat, p.name);
+    const names = lobby.seats[String(p.seat)] ?? [];
+    const clash = mode === 'host' ? names.length > 1 : p.seat === seat && p.name !== me;
+    const event: ReceiveEvent = { type: 'hello', seat: p.seat, name: p.name, clash };
+    return { state: lobby === s.lobby ? s : { ...s, lobby }, event };
+  }
+  // call: only a ready player outside an active round takes part
+  if (mode !== 'player' || !seat || !me || (s.game && !s.game.revealed)) return same;
+  const prev = s.lobby?.owner === 'player' ? s.lobby : null;
+  const lobby: Lobby = {
+    ...(prev && prev.lobbyId === p.gameId ? prev : newLobby('player', p.gameId)),
+    helloSent: prev?.helloSent ?? false,
+    call: { host: p.name, players: p.players, confirmed: maskToSeats(p.confirmed), duplicate: maskToSeats(p.duplicate) },
+  };
+  const confirmed = lobby.call!.confirmed.includes(seat);
+  const duplicate = lobby.call!.duplicate.includes(seat);
+  return {
+    state: { ...s, lobby },
+    event: { type: 'call', host: p.name, players: p.players, confirmed, duplicate, seatTooHigh: seat > p.players, replyIn: helloDelay(seat, p.confirmed, p.duplicate) },
+  };
+}
+
 /** Pure: apply a decoded packet. Anything not accepted returns the same state object. */
 export function receive(s: State, p: Packet, now: number): { state: State; event: ReceiveEvent } {
+  // Ready-check chirps are idempotent and are never remembered as seen.
+  if (p.type === 'call' || p.type === 'hello') return receiveLobby(s, p);
+  const g = s.game;
+  if (p.type === 'ack') {
+    if (!g || g.seat !== 1 || g.gameId !== p.gameId || !g.results || p.seat < 2 || p.seat > g.players) return { state: s, event: { type: 'ignored' } };
+    const acks = g.acks ?? [];
+    if (acks.includes(p.seat)) return { state: s, event: { type: 'ack', seat: p.seat } };
+    return { state: { ...s, game: { ...g, acks: [...acks, p.seat].sort((a, b) => a - b) } }, event: { type: 'ack', seat: p.seat } };
+  }
+
   const key = packetKey(p);
   if (s.sent.includes(key)) return { state: s, event: { type: 'own-echo' } };
   if (s.retired.includes(p.gameId)) return { state: s, event: { type: 'stale' } };
-  const g = s.game;
 
   // Requests are never remembered as "seen": the same hop can be asked for again.
   if (p.type === 'need') {
     if (!g || g.gameId !== p.gameId) return { state: s, event: { type: 'other-game' } };
     return { state: s, event: { type: 'need', step: p.step } };
+  }
+
+  // Repeated results: confirm again (the host may have missed it), never re-score.
+  if (p.type === 'results' && g && g.gameId === p.gameId && (g.results || s.seen.includes(key))) {
+    return { state: s, event: { type: 'results', again: true, ackIn: g.seat === 1 ? null : ackDelay(g.seat) } };
+  }
+
+  // A ready player hearing a turn of a round it isn't in missed the start signal.
+  const ready = s.profile.mode === 'player' && !!s.profile.seat && !!cleanName(s.profile.name);
+  if (p.type === 'entry' && ready && (!g || (g.revealed && g.gameId !== p.gameId))) {
+    return { state: s, event: { type: 'missed-start', gameId: p.gameId } };
   }
 
   if (s.seen.includes(key)) return { state: s, event: { type: 'duplicate' } };
@@ -331,9 +504,11 @@ export function receive(s: State, p: Packet, now: number): { state: State; event
   }
 
   // results (also implies the reveal, for devices that missed it)
-  if (g.results) return { state: s, event: { type: 'ignored' } };
   const results: Results = { funniest: p.funniest, recognizable: p.recognizable, recovery: p.recovery, final: p.final };
-  return accept({ ...s, game: { ...g, results, revealed: true, revealedAt: g.revealedAt ?? now } }, { type: 'results' });
+  return accept(
+    { ...s, game: { ...g, results, revealed: true, revealedAt: g.revealedAt ?? now } },
+    { type: 'results', again: false, ackIn: g.seat === 1 ? null : ackDelay(g.seat) },
+  );
 }
 
 // ---- sending --------------------------------------------------------------------
@@ -345,10 +520,18 @@ export interface Outgoing {
   bytes: Uint8Array;
 }
 
-/** Record a chirp to play. Exported so recovery replies can be played one by one. */
-export function outgoingFor(s: State, packet: Packet): Outgoing {
+/**
+ * Record a chirp to play. Exported so recovery replies can be played one by
+ * one. Automatic replies (`keepLast`) don't replace what "Resend my last
+ * chirp" plays.
+ */
+export function outgoingFor(s: State, packet: Packet, opts: { keepLast?: boolean } = {}): Outgoing {
   const bytes = encodePacket(packet);
-  return { packet, bytes, state: { ...s, sent: pushLimited(s.sent, packetKey(packet), SEEN_LIMIT), lastSent: Array.from(bytes) } };
+  return {
+    packet,
+    bytes,
+    state: { ...s, sent: pushLimited(s.sent, packetKey(packet), SEEN_LIMIT), lastSent: opts.keepLast ? s.lastSent : Array.from(bytes) },
+  };
 }
 
 export function setProfile(s: State, profile: Partial<Profile>): State {
@@ -409,7 +592,8 @@ export function startGame(s: State, opts: StartOptions): Outgoing | null {
 /** Host: start the next round of the current Party Match (same players, line, and category). */
 export function nextRound(s: State, gameId: number, now: number): Outgoing | null {
   const g = s.game;
-  if (!g || g.seat !== 1 || g.mode !== 'match' || !g.revealed || g.round >= ROUNDS_MAX) return null;
+  // Results are required: the next start retires this round, and with it any recovery.
+  if (!g || g.seat !== 1 || g.mode !== 'match' || !g.revealed || !g.results || g.round >= ROUNDS_MAX) return null;
   const id = freshId(s, gameId);
   const p = { ...(startPacketOf(g) as Extract<Packet, { type: 'start' }>), gameId: id, round: g.round + 1 };
   return outgoingFor(
@@ -491,6 +675,7 @@ export function askFor(s: State, step: number): Outgoing | null {
 export function autoAnswer(s: State, step: number): Packet[] {
   const g = s.game;
   if (!g) return [];
+  if (step === NEED_START) return g.seat === 1 ? [startPacketOf(g)] : [];
   if (step === 0) {
     if (g.seat !== 1 || !g.revealed) return [];
     const out: Packet[] = [{ type: 'reveal', gameId: g.gameId, players: g.players }];
@@ -499,6 +684,32 @@ export function autoAnswer(s: State, step: number): Packet[] {
   }
   const e = entryAt(g, step);
   return myStep(g) === step && e ? [entryPacket(g, e)] : [];
+}
+
+/** A ready player who missed a round's start asks the host for it (only the host answers). */
+export function askToJoin(s: State, gameId: number): Outgoing | null {
+  if (s.profile.mode !== 'player' || !s.profile.seat || (s.game && !s.game.revealed)) return null;
+  return outgoingFor(s, { type: 'need', gameId: gameId & 0xffff, step: NEED_START }, { keepLast: true });
+}
+
+/** Player: confirm the results to the host. Recorded locally as acks = [own seat]. */
+export function ackPacket(s: State): Outgoing | null {
+  const g = s.game;
+  if (!g || g.seat === 1 || !g.results) return null;
+  const out = outgoingFor(s, { type: 'ack', gameId: g.gameId, seat: g.seat }, { keepLast: true });
+  return { ...out, state: { ...out.state, game: { ...g, acks: [g.seat] } } };
+}
+
+/** Host: replay the results byte-identically (players re-confirm; nothing is re-scored). */
+export function resendResults(s: State): Outgoing | null {
+  const g = s.game;
+  return g && g.seat === 1 && g.results ? outgoingFor(s, { type: 'results', gameId: g.gameId, ...g.results }) : null;
+}
+
+/** Host: seats (2..N) that haven't confirmed the results yet. */
+export function awaitingAcks(g: Game): number[] {
+  const acks = g.acks ?? [];
+  return Array.from({ length: g.players - 1 }, (_, i) => i + 2).filter((k) => !acks.includes(k));
 }
 
 /** True if this device holds a hop that someone asked for, but is not its author (manual relay). */
