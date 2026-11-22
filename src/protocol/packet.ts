@@ -2,19 +2,26 @@ import { crc8 } from './crc8';
 import { packGrid, unpackGrid, type Grid } from './drawing';
 
 /**
- * Dial-Up Telephone packet v3 (see .kiro/specs/ghost-frequency/design.md), ≤ 58 bytes:
- *  0     magic 0xD3
+ * Dial-Up Telephone packet v4 (see .kiro/specs/ghost-frequency/design.md), ≤ 58 bytes:
+ *  0     magic 0xD4
  *  1     bits0-3 type: 1 start · 2 entry · 3 reveal · 4 results · 5 need · 6 call · 7 hello · 8 ack
  *        bits4-5 static level (start only)
- *  6-7   call: confirmed-seat mask, duplicated-seat mask
  *  2-3   game ID (uint16 BE)
- *  4     start/reveal: players · entry/need: step · results: funniest step
+ *  4     start/reveal/call: players · entry/need: step · results: funniest step · hello/ack: seat
  *  5     bits0-3 text length · bits4-7 name length
  *  6..   start: match ID (2) + round/mode/category (1) · results: recognizable|recovery<<4 (1), final (1)
+ *        call: confirmed-seat mask, duplicated-seat mask · hello: player ID (2) · ack: what it confirms (1)
  *        entry: [drawing 32 bytes on odd steps] [text: guess, or the secret word on step 1] [name]
  *  last  CRC-8 over all previous bytes
+ *
+ * v4 changed hello (adds a player ID, so two players with the same name are
+ * never merged) and ack (adds what it confirms: results, the start, or a hop).
+ * Packets from other versions are reported as such, never misread.
  */
-export const MAGIC = 0xd3;
+export const MAGIC = 0xd4;
+export const PROTOCOL_VERSION = 4;
+/** Every version so far used 0xD1..0xDF as its magic byte (0xD0 + version). */
+const MAGIC_FAMILY = 0xd0;
 export const DRAW_SIZE = 16;
 export const DRAW_BYTES = (DRAW_SIZE * DRAW_SIZE) / 8; // 32
 export const TEXT_MAX = 12;
@@ -49,12 +56,32 @@ export type Packet =
   | { type: 'need'; gameId: number; step: number }
   /** Host's ready check. `confirmed` / `duplicate` are seat masks. */
   | { type: 'call'; gameId: number; players: number; name: string; confirmed: number; duplicate: number }
-  /** A player's "I'm ready" (mic works). gameId is the lobby ID heard in a call, or 0. */
-  | { type: 'hello'; gameId: number; seat: number; name: string }
-  /** A player confirms it received the round's results. */
-  | { type: 'ack'; gameId: number; seat: number };
+  /**
+   * A player's "I'm ready" (mic works). gameId is the lobby ID heard in a call, or 0.
+   * `pid` is a random ID for this browser tab (1..65535): the player's identity, independent of the name.
+   */
+  | { type: 'hello'; gameId: number; seat: number; name: string; pid: number }
+  /**
+   * A confirmation from `seat`. `step` says what it confirms, numbered like `need`:
+   * 0 = the results, 1..8 = that hop arrived (sent by the next player), 9 = the start signal.
+   */
+  | { type: 'ack'; gameId: number; seat: number; step: number };
 
-export type PacketError = 'too-short' | 'too-long' | 'bad-magic' | 'bad-type' | 'bad-count' | 'bad-length' | 'bad-text' | 'bad-checksum';
+/** `ack` step that confirms the results. */
+export const ACK_RESULTS = 0;
+
+export type PacketError =
+  | 'too-short'
+  | 'too-long'
+  | 'bad-magic'
+  | 'bad-type'
+  | 'bad-count'
+  | 'bad-length'
+  | 'bad-text'
+  | 'bad-checksum'
+  /** A valid chirp from an older or newer version of the game. */
+  | 'old-version'
+  | 'new-version';
 
 export type DecodeResult = { ok: true; packet: Packet } | { ok: false; error: PacketError };
 
@@ -136,12 +163,16 @@ export function encodePacket(p: Packet): Uint8Array {
       break;
     case 'hello':
       if (!inRange(p.seat, 1, PLAYERS_MAX)) throw new Error('seat must be 1..8');
+      if (!inRange(p.pid, 1, 0xffff)) throw new Error('player ID must be 1..65535');
       count = p.seat;
       name = req(cleanName(p.name), 'name');
+      extra = [p.pid >> 8, p.pid & 0xff];
       break;
     case 'ack':
       if (!inRange(p.seat, 1, PLAYERS_MAX)) throw new Error('seat must be 1..8');
+      if (!inRange(p.step, 0, NEED_START)) throw new Error('ack step must be 0..9');
       count = p.seat;
+      extra = [p.step];
       break;
   }
   const body = [MAGIC, TYPE[p.type] | flags, p.gameId >> 8, p.gameId & 0xff, count, text.length | (name.length << 4), ...extra, ...drawing, ...ascii(text), ...ascii(name)];
@@ -155,8 +186,14 @@ export function decodePacket(b: Uint8Array): DecodeResult {
   const fail = (error: PacketError): DecodeResult => ({ ok: false, error });
   if (b.length < 7) return fail('too-short');
   if (b.length > MAX_PACKET) return fail('too-long');
-  if (b[0] !== MAGIC) return fail('bad-magic');
-  if (crc8(b.subarray(0, b.length - 1)) !== b[b.length - 1]) return fail('bad-checksum');
+  const crcOk = crc8(b.subarray(0, b.length - 1)) === b[b.length - 1];
+  if (b[0] !== MAGIC) {
+    // Only an intact chirp counts as "another version"; random noise is just unreadable.
+    const family = (b[0] & 0xf0) === MAGIC_FAMILY && (b[0] & 0x0f) !== 0;
+    if (family && crcOk) return fail(b[0] < MAGIC ? 'old-version' : 'new-version');
+    return fail('bad-magic');
+  }
+  if (!crcOk) return fail('bad-checksum');
 
   const type = TYPE_BY_NUM[b[1] & 0x0f];
   const noise = b[1] >> 4;
@@ -167,7 +204,7 @@ export function decodePacket(b: Uint8Array): DecodeResult {
   const nameLen = b[5] >> 4;
   if (textLen > TEXT_MAX || nameLen > NAME_MAX) return fail('bad-length');
 
-  const extraLen = type === 'start' ? 3 : type === 'results' || type === 'call' ? 2 : 0;
+  const extraLen = type === 'start' ? 3 : type === 'results' || type === 'call' || type === 'hello' ? 2 : type === 'ack' ? 1 : 0;
   const drawingLen = type === 'entry' && isDrawingStep(count) ? DRAW_BYTES : 0;
   if (b.length !== 6 + extraLen + drawingLen + textLen + nameLen + 1) return fail('bad-length');
   const at = 6 + extraLen + drawingLen;
@@ -222,19 +259,23 @@ export function decodePacket(b: Uint8Array): DecodeResult {
       if (count < PLAYERS_MIN || count > PLAYERS_MAX) return fail('bad-count');
       if (nameLen === 0 || textLen !== 0) return fail('bad-length');
       return { ok: true, packet: { type, gameId, players: count, name, confirmed: b[6], duplicate: b[7] } };
-    case 'hello':
+    case 'hello': {
       if (count < 1 || count > PLAYERS_MAX) return fail('bad-count');
       if (nameLen === 0 || textLen !== 0) return fail('bad-length');
-      return { ok: true, packet: { type, gameId, seat: count, name } };
+      const pid = (b[6] << 8) | b[7];
+      if (pid === 0) return fail('bad-count');
+      return { ok: true, packet: { type, gameId, seat: count, name, pid } };
+    }
     case 'ack':
-      if (count < 1 || count > PLAYERS_MAX) return fail('bad-count');
+      if (count < 1 || count > PLAYERS_MAX || b[6] > NEED_START) return fail('bad-count');
       if (textLen || nameLen) return fail('bad-length');
-      return { ok: true, packet: { type, gameId, seat: count } };
+      return { ok: true, packet: { type, gameId, seat: count, step: b[6] } };
   }
 }
 
 export function packetKey(p: Packet): string {
-  const step = p.type === 'entry' || p.type === 'need' ? p.step : p.type === 'hello' || p.type === 'ack' ? p.seat : 0;
+  if (p.type === 'ack') return `${p.gameId}:ack:${p.step}:${p.seat}`;
+  const step = p.type === 'entry' || p.type === 'need' ? p.step : p.type === 'hello' ? p.seat : 0;
   return `${p.gameId}:${p.type}:${step}`;
 }
 
@@ -254,7 +295,9 @@ export function describePacket(p: Packet, bytes: number): string {
     case 'hello':
       return `ready message from seat ${p.seat} · ${bytes} bytes`;
     case 'ack':
-      return `results confirmation from seat ${p.seat} · ${bytes} bytes`;
+      if (p.step === ACK_RESULTS) return `results confirmation from seat ${p.seat} · ${bytes} bytes`;
+      if (p.step === NEED_START) return `start confirmation from seat ${p.seat} · ${bytes} bytes`;
+      return `"got hop ${p.step}" from seat ${p.seat} · ${bytes} bytes`;
     case 'entry':
       if ('drawing' in p) return `16×16 drawing (32 bytes)${p.word ? ' + secret word' : ''} + name · ${bytes} bytes`;
       return `guess (${p.text.length} letters) + name · ${bytes} bytes`;

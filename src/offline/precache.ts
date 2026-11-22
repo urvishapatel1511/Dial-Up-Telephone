@@ -46,7 +46,8 @@ export function buildManifest(files: { path: string; bytes: Uint8Array }[]): Pre
   };
 }
 
-export const cacheName = (version: string) => `ghostfreq-${version}`;
+/** Must match PREFIX in scripts/sw-template.js. */
+export const cacheName = (version: string) => `dialup-${version}`;
 
 export interface VerifyResult {
   ok: boolean;

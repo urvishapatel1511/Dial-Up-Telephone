@@ -1,6 +1,6 @@
 {
   "name": "dial-up-telephone",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Dial-Up Telephone: the telephone drawing game, played over an acoustic modem. Every drawing and guess travels between phones as sound.",
   "license": "MIT",

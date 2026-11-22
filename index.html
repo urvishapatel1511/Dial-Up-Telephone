@@ -56,7 +56,16 @@
       </div>
     </div>
 
+    <div id="update" class="update-bar" role="status" hidden>
+      <p><b>Update available</b> <span id="update-note"></span></p>
+      <button id="update-btn" type="button" class="small">⟳ Reload to update</button>
+    </div>
+    <p id="version-warn" class="version-warn" role="alert" hidden></p>
+
     <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <!-- What happened to the chirps this phone sent: playing, waiting, confirmed, or no confirmation yet. -->
+    <ul id="delivery" class="delivery" aria-label="Your chirps" aria-live="polite" hidden></ul>
 
     <!-- LOBBY -->
     <section id="lobby" class="card intro" hidden>
@@ -282,12 +291,14 @@
 
       <div id="scores-box" hidden>
         <h3 id="scores-title">Scores</h3>
+        <p id="scores-top" class="top-line" hidden></p>
         <ol id="scores" class="scores"></ol>
         <p id="scores-note" class="small"></p>
       </div>
 
       <div id="match-box" hidden>
         <h3 id="match-title">Party Match totals</h3>
+        <p id="standings-top" class="top-line" hidden></p>
         <ol id="standings" class="scores"></ol>
       </div>
 
@@ -307,6 +318,7 @@
     </section>
 
     <p id="chirp-info" class="chirp-info"></p>
+    <footer class="app-foot"><span id="app-version"></span></footer>
 
     <!-- Same loading approach as ggwave's examples/ggwave-js: classic script, global ggwave_factory. -->
     <script src="./vendor/ggwave.js"></script>

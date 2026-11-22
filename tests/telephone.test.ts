@@ -37,6 +37,8 @@ import {
   setProfile,
   setWordDraft,
   startGame,
+  STORAGE_KEY,
+  withPlayerId,
   type KeyValueStore,
   type Outgoing,
   type Results,
@@ -352,6 +354,15 @@ describe('missed-message recovery (R1)', () => {
     expect(r.devices[3].game!.conflict).toBe('Bo');
   });
 
+  it('two phones on the same seat with the SAME name are reported too (not taken for an echo)', () => {
+    const r = room(3, [{ name: 'Bo', seat: 2 }]);
+    r.start();
+    r.turn(1);
+    r.turn(2); // the first Bo plays seat 2
+    expect(r.log).toContain('4:conflict');
+    expect(r.devices[3].game!.conflict).toBe('Bo');
+  });
+
   it('Resend replays identical bytes and is ignored by everyone who already heard it', () => {
     const r = room(3);
     r.start();
@@ -551,10 +562,27 @@ describe('persistence (per tab)', () => {
     const store = memoryStore();
     saveState(store, r.devices[1]);
     expect(loadState(store)).toEqual(r.devices[1]);
-    store.setItem('dialup:v3', JSON.stringify({ v: 2, profile: {}, seen: [], sent: [] }));
+    store.setItem(STORAGE_KEY, JSON.stringify({ v: 2, profile: {}, seen: [], sent: [] }));
     expect(loadState(store)).toEqual(initialState());
-    store.setItem('dialup:v3', '{not json');
+    store.setItem(STORAGE_KEY, '{not json');
     expect(loadState(store)).toEqual(initialState());
+  });
+
+  it('after an update from v3, only the name, role, and seat carry over (old rounds used v3 chirps)', () => {
+    const store = memoryStore();
+    store.setItem('dialup:v3', JSON.stringify({ v: 3, profile: { name: 'Bo', mode: 'player', seat: 3 }, game: { gameId: 1 }, seen: ['x'], sent: [] }));
+    const s = loadState(store);
+    expect(s.profile).toEqual({ name: 'Bo', mode: 'player', seat: 3, pid: 0 });
+    expect(s.game).toBeNull();
+    expect(withPlayerId(s, () => 0x1234).profile.pid).toBe(0x1234);
+  });
+
+  it('every tab gets a player ID, never 0, and keeps it', () => {
+    let n = 0;
+    const seq = [0, 0, 42];
+    const s = withPlayerId(initialState(), () => seq[n++]);
+    expect(s.profile.pid).toBe(42);
+    expect(withPlayerId(s, () => 7)).toBe(s);
   });
 
   it('drawings survive storage exactly', () => {

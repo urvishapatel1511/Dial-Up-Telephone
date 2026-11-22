@@ -24,7 +24,7 @@ const start = (over: Partial<Extract<Packet, { type: 'start' }>> = {}): Packet =
   ...over,
 });
 
-describe('v3 packets round-trip (C3)', () => {
+describe('v4 packets round-trip (C3)', () => {
   it('decodes exactly what was encoded, and never exceeds 58 bytes', () => {
     fc.assert(
       fc.property(packetArb, (p) => {
@@ -37,7 +37,7 @@ describe('v3 packets round-trip (C3)', () => {
 
   it('sizes: first drawing 58, other drawings 46, guesses 26, start ≤ 17, reveal/need 7, results 9', () => {
     expect(MAX_PACKET).toBe(58);
-    expect(MAGIC).toBe(0xd3);
+    expect(MAGIC).toBe(0xd4);
     expect(encodePacket({ type: 'entry', gameId: 1, step: 1, name: 'ABCDEFG', drawing: grid16(), word: 'ABCDEFGHIJKL' }).length).toBe(58);
     expect(encodePacket({ type: 'entry', gameId: 1, step: 7, name: 'ABCDEFG', drawing: grid16() }).length).toBe(46);
     expect(encodePacket({ type: 'entry', gameId: 0xffff, step: 8, name: 'ABCDEFG', text: 'ABCDEFGHIJKL' }).length).toBe(26);
@@ -47,21 +47,39 @@ describe('v3 packets round-trip (C3)', () => {
     expect(encodePacket({ type: 'results', gameId: 1, funniest: 8, recognizable: 7, recovery: 6, final: 2 }).length).toBe(9);
   });
 
-  it('ready check and results confirmation packets: call ≤ 16, hello ≤ 14, ack 7, need-start 7', () => {
+  it('ready check and confirmation packets: call ≤ 16, hello ≤ 16, ack 8, need-start 7 (all ≤ 17)', () => {
     expect(encodePacket({ type: 'call', gameId: 5, players: 8, name: 'ABCDEFG', confirmed: 0xff, duplicate: 0x0c }).length).toBe(16);
-    expect(encodePacket({ type: 'hello', gameId: 5, seat: 8, name: 'ABCDEFG' }).length).toBe(14);
-    expect(encodePacket({ type: 'ack', gameId: 5, seat: 2 }).length).toBe(7);
+    expect(encodePacket({ type: 'hello', gameId: 5, seat: 8, name: 'ABCDEFG', pid: 0xffff }).length).toBe(16);
+    expect(encodePacket({ type: 'ack', gameId: 5, seat: 2, step: 0 }).length).toBe(8);
     expect(encodePacket({ type: 'need', gameId: 5, step: NEED_START }).length).toBe(7);
-    expect(() => encodePacket({ type: 'hello', gameId: 5, seat: 9, name: 'A' })).toThrow();
+    expect(() => encodePacket({ type: 'hello', gameId: 5, seat: 9, name: 'A', pid: 1 })).toThrow();
+    expect(() => encodePacket({ type: 'hello', gameId: 5, seat: 2, name: 'A', pid: 0 })).toThrow(/player ID/);
+    expect(() => encodePacket({ type: 'ack', gameId: 5, seat: 2, step: 10 })).toThrow();
     expect(() => encodePacket({ type: 'call', gameId: 5, players: 4, name: 'A', confirmed: 256, duplicate: 0 })).toThrow();
     expect(() => encodePacket({ type: 'need', gameId: 1, step: 10 })).toThrow();
     expect(seatsToMask([1, 3, 8])).toBe(0b10000101);
     expect(maskToSeats(0b10000101)).toEqual([1, 3, 8]);
   });
 
-  it('call, hello, and ack keys name their seat, so they never look like each other', () => {
-    expect(packetKey({ type: 'hello', gameId: 5, seat: 3, name: 'Bo' })).toBe('5:hello:3');
-    expect(packetKey({ type: 'ack', gameId: 5, seat: 3 })).toBe('5:ack:3');
+  it('hello carries the player ID; ack says what it confirms (results, a hop, or the start)', () => {
+    const hello: Packet = { type: 'hello', gameId: 5, seat: 3, name: 'Bo', pid: 0xbeef };
+    expect(decodePacket(encodePacket(hello))).toEqual({ ok: true, packet: hello });
+    for (const step of [0, 1, 8, NEED_START]) {
+      const ack: Packet = { type: 'ack', gameId: 5, seat: 3, step };
+      expect(decodePacket(encodePacket(ack))).toEqual({ ok: true, packet: ack });
+    }
+    const h = encodePacket(hello);
+    h[6] = h[7] = 0;
+    expect(decodePacket(reseal(h))).toEqual({ ok: false, error: 'bad-count' }); // player ID 0 is never valid
+    const a = encodePacket({ type: 'ack', gameId: 5, seat: 3, step: 2 });
+    a[6] = 10;
+    expect(decodePacket(reseal(a))).toEqual({ ok: false, error: 'bad-count' });
+  });
+
+  it('call, hello, and ack keys name their seat (and an ack its step), so they never look like each other', () => {
+    expect(packetKey({ type: 'hello', gameId: 5, seat: 3, name: 'Bo', pid: 7 })).toBe('5:hello:3');
+    expect(packetKey({ type: 'ack', gameId: 5, seat: 3, step: 0 })).toBe('5:ack:0:3');
+    expect(packetKey({ type: 'ack', gameId: 5, seat: 3, step: 2 })).not.toBe(packetKey({ type: 'ack', gameId: 5, seat: 3, step: 0 }));
   });
 
   it('start carries static level, mode, match ID, round, and category', () => {
@@ -108,10 +126,10 @@ describe('v3 packets round-trip (C3)', () => {
 describe('invalid packets are rejected', () => {
   const good = encodePacket({ type: 'entry', gameId: 300, step: 2, name: 'Bo', text: 'fish' });
 
-  it('length, magic (including v1 and v2), checksum, type', () => {
+  it('length, magic, checksum, type', () => {
     expect(decodePacket(good.subarray(0, 5))).toEqual({ ok: false, error: 'too-short' });
     expect(decodePacket(new Uint8Array(59))).toEqual({ ok: false, error: 'too-long' });
-    for (const magic of [0xd1, 0xd2, 0xa4]) {
+    for (const magic of [0xa4, 0xd0, 0x00]) {
       const m = good.slice();
       m[0] = magic;
       expect(decodePacket(reseal(m))).toEqual({ ok: false, error: 'bad-magic' });
@@ -122,6 +140,26 @@ describe('invalid packets are rejected', () => {
     const t = good.slice();
     t[1] = 9;
     expect(decodePacket(reseal(t))).toEqual({ ok: false, error: 'bad-type' });
+  });
+
+  it('intact chirps from older (v1-v3) or newer versions are reported as such, never misread', () => {
+    // A real v3 ack (7 bytes) and v3 hello (no player ID), as the previous release encoded them.
+    const v3ack = reseal(new Uint8Array([0xd3, 8, 0, 5, 2, 0, 0]));
+    const v3hello = reseal(new Uint8Array([0xd3, 7, 0, 5, 2, 0x20, 0x42, 0x6f, 0]));
+    expect(decodePacket(v3ack)).toEqual({ ok: false, error: 'old-version' });
+    expect(decodePacket(v3hello)).toEqual({ ok: false, error: 'old-version' });
+    for (const magic of [0xd1, 0xd2, 0xd3]) {
+      const m = good.slice();
+      m[0] = magic;
+      expect(decodePacket(reseal(m))).toEqual({ ok: false, error: 'old-version' });
+    }
+    const newer = good.slice();
+    newer[0] = 0xd5;
+    expect(decodePacket(reseal(newer))).toEqual({ ok: false, error: 'new-version' });
+    // A damaged chirp is just unreadable: no version warning from noise.
+    const damaged = reseal(good.slice());
+    damaged[0] = 0xd3;
+    expect(decodePacket(damaged)).toEqual({ ok: false, error: 'bad-magic' });
   });
 
   it('a static level is only allowed on start, and only 0-2', () => {
@@ -168,7 +206,7 @@ describe('invalid packets are rejected', () => {
     const n = encodePacket({ type: 'need', gameId: 1, step: 2 });
     n[4] = 10;
     expect(decodePacket(reseal(n))).toEqual({ ok: false, error: 'bad-count' });
-    const h = encodePacket({ type: 'hello', gameId: 1, seat: 2, name: 'Bo' });
+    const h = encodePacket({ type: 'hello', gameId: 1, seat: 2, name: 'Bo', pid: 9 });
     h[4] = 0;
     expect(decodePacket(reseal(h))).toEqual({ ok: false, error: 'bad-count' });
   });

@@ -1,11 +1,11 @@
 import { createRequire } from 'node:module';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { concatSamples, handshakeSamples, wantsHandshake } from '../src/audio/handshake';
-import { ACK_SLOT_MS, HELLO_SLOT_MS } from '../src/game/schedule';
+import { ACK_SLOT_MS, HELLO_SLOT_MS, LONGEST_ANSWER_MS } from '../src/game/schedule';
 import { Modem } from '../src/audio/modem';
 import type { GgwaveFactory } from '../src/audio/ggwave-types';
 import { emptyGrid } from '../src/protocol/drawing';
-import { decodePacket, encodePacket } from '../src/protocol/packet';
+import { decodePacket, encodePacket, NEED_START } from '../src/protocol/packet';
 
 const require = createRequire(import.meta.url);
 const factory = require('ggwave') as GgwaveFactory;
@@ -66,9 +66,9 @@ describe('ggwave pipeline in Node (synthetic waveform, no air path)', () => {
     }
   });
 
-  it('the longest ready message and results confirmation fit inside their reply slots, with margin', () => {
-    const hello = encodePacket({ type: 'hello', gameId: 0xffff, seat: 8, name: 'ABCDEFG' });
-    const ack = encodePacket({ type: 'ack', gameId: 0xffff, seat: 8 });
+  it('the longest ready message and confirmation fit inside their reply slots, with margin', () => {
+    const hello = encodePacket({ type: 'hello', gameId: 0xffff, seat: 8, name: 'ABCDEFG', pid: 0xffff });
+    const ack = encodePacket({ type: 'ack', gameId: 0xffff, seat: 8, step: NEED_START });
     const call = encodePacket({ type: 'call', gameId: 0xffff, players: 8, name: 'ABCDEFG', confirmed: 0xff, duplicate: 0xff });
     const helloMs = tx.durationMs(tx.encode(hello));
     const ackMs = tx.durationMs(tx.encode(ack));
@@ -77,6 +77,16 @@ describe('ggwave pipeline in Node (synthetic waveform, no air path)', () => {
     expect(helloMs + 300).toBeLessThanOrEqual(HELLO_SLOT_MS);
     expect(ackMs + 300).toBeLessThanOrEqual(ACK_SLOT_MS);
     for (const p of [hello, ack, call]) expect(Array.from(receiveOverWire(rx, tx.encode(p)) ?? [])).toEqual(Array.from(p));
+  });
+
+  it('the longest answer to a request fits the time other phones keep the line free for it', () => {
+    const first = encodePacket({ type: 'entry', gameId: 0xff80, step: 1, name: 'ABCDEFG', drawing: drawing(), word: 'ABCDEFGHIJKL' });
+    const reveal = encodePacket({ type: 'reveal', gameId: 9, players: 8 });
+    const results = encodePacket({ type: 'results', gameId: 9, funniest: 8, recognizable: 7, recovery: 6, final: 2 });
+    const firstMs = tx.durationMs(tx.encode(first));
+    const pairMs = tx.durationMs(tx.encode(reveal)) + tx.durationMs(tx.encode(results));
+    console.log(`longest answers: first drawing ${firstMs} ms · reveal + results ${pairMs} ms (synthetic)`);
+    expect(Math.max(firstMs, pairMs)).toBeLessThanOrEqual(LONGEST_ANSWER_MS);
   });
 
   it('the handshake plays only before a fresh start signal, never on entries or resends (R4.1)', () => {

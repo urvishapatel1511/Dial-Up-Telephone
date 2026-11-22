@@ -8,10 +8,12 @@ import { Visualizer } from './audio/visualizer';
 import type { GgwaveFactory } from './audio/ggwave-types';
 import { concatSamples, handshakeSamples, wantsHandshake } from './audio/handshake';
 import { captionFor, fairNote, STATIC_DRAWING_NOTE, STATIC_TEXT_NOTE } from './game/captions';
+import { check as checkDelivery, manualRetry, newDelivery, played, playFailed, postpone, type Delivery, type DeliveryKind } from './game/delivery';
 import { MATCH_ROUNDS } from './game/match';
 import { NOISE_INFO } from './game/noise';
+import { competitionRanks, joinNames, topRanked, winnerNames } from './game/ranking';
 import { CATEGORIES, categoryOf } from './game/words';
-import { callWindowMs } from './game/schedule';
+import { ANSWER_DELAY_MS, callWindowMs, RECEIPT_DELAY_MS, replyWindowMs } from './game/schedule';
 import {
   ackPacket,
   addAirtime,
@@ -19,11 +21,18 @@ import {
   askToJoin,
   autoAnswer,
   awaitingAcks,
+  awaitingJoin,
   awardOptions,
   callPacket,
   canRelay,
   helloPacket,
+  hopDelivered,
+  joinedSeats,
   openLobby,
+  receiptPacket,
+  receiverSeat,
+  startAckPacket,
+  withPlayerId,
   readyStatus,
   resendResults,
   roster,
@@ -70,8 +79,23 @@ import {
   type State,
 } from './game/telephone';
 import { isOfflineReady, prepareOffline, registerServiceWorker } from './offline/offline';
+import { updateAdvice, versionMismatchText } from './offline/update';
 import { type Grid } from './protocol/drawing';
-import { cleanName, cleanText, decodePacket, describePacket, DRAW_SIZE, isDrawingStep, NEED_START, type FinalGuess, type GameMode, type NoiseLevel, type Packet } from './protocol/packet';
+import {
+  ACK_RESULTS,
+  cleanName,
+  cleanText,
+  decodePacket,
+  describePacket,
+  DRAW_SIZE,
+  isDrawingStep,
+  NEED_START,
+  PROTOCOL_VERSION,
+  type FinalGuess,
+  type GameMode,
+  type NoiseLevel,
+  type Packet,
+} from './protocol/packet';
 import { SendGate } from './state/sender';
 import { DrawingEditor } from './ui/editor';
 import { renderGrid } from './ui/grid';
@@ -93,9 +117,12 @@ interface Action {
 const FX_KEY = 'dialup:effects';
 const NO_SIGNAL_HINT_MS = 30_000;
 const AUDIO_TIMEOUT_MS = 10_000;
-/** Pause before the author answers a request, so the asker's speaker is quiet. */
-const ANSWER_DELAY_MS = 900;
 const SHOW_STEP_MS = 2600;
+/** Never wait longer than this for the line to clear before playing anyway. */
+const LINE_WAIT_MAX_MS = 20_000;
+/** A confirmed delivery stays on screen this long. */
+const CONFIRMED_SHOWN_MS = 12_000;
+const APP_VERSION = `v${__APP_VERSION__}${__APP_BUILD__ ? ` · ${__APP_BUILD__}` : ''}`;
 const IN_GAME: Phase[] = ['ready', 'my-turn', 'waiting', 'sent', 'missing', 'ready-to-reveal'];
 const LISTEN_PHASES: Phase[] = ['ready', 'waiting', 'sent', 'missing', 'host-setup'];
 
@@ -105,7 +132,10 @@ const randomU16 = () => crypto.getRandomValues(new Uint16Array(1))[0];
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // One browser tab = one player (sessionStorage), so several windows on one laptop can play.
-let state: State = loadState(sessionStorage);
+// The player ID identifies this tab in the ready check, independently of the name.
+let state: State = withPlayerId(loadState(sessionStorage), randomU16);
+// A host screen restored without its ready check (e.g. from the previous version): reopen it.
+if (state.profile.mode === 'host' && !state.game && state.lobby?.owner !== 'host') state = openLobby(state, randomU16());
 
 // UI-only state
 let joinScreen = false;
@@ -136,6 +166,18 @@ let currentTertiary: (() => Promise<void> | void) | null = null;
 let againRun: (() => Promise<void> | void) | null = null;
 let fxOn = localStorage.getItem(FX_KEY) !== 'off';
 let fxUntil = 0;
+/** Other phones are expected to answer automatically until this time: don't start a new chirp. */
+let quietUntil = 0;
+/** A send is waiting for the line to clear. */
+let lineWait = false;
+/** What happened to the chirps this phone sent, at most one per kind. */
+const deliveries = new Map<DeliveryKind, Delivery>();
+const confirmedAt = new Map<DeliveryKind, number>();
+let deliveryTimer: number | undefined;
+/** A new app version is downloaded and waiting; calling this activates it and reloads. */
+let applyUpdate: (() => void) | null = null;
+/** Set when a chirp from another version of the game was heard. */
+let versionWarning: string | null = null;
 
 // Audio
 let ctx: AudioContext | null = null;
@@ -190,15 +232,22 @@ function whoWithSeat(g: Game, step: number): string {
 }
 const verb = (step: number, done: boolean) => (isDrawingStep(step) ? (done ? 'drew' : 'drawing') : done ? 'guessed' : 'guessing');
 const hopName = (k: number) => (isDrawingStep(k) ? 'drawing' : 'guess');
-/** A hop is confirmed once any later hop is heard: someone after it must have received it. */
-const confirmedHop = (g: Game, k: number) => Array.from({ length: g.players - k }, (_, i) => k + 1 + i).some((j) => !!entryAt(g, j));
 const roundLabel = (g: Game) => (g.mode === 'match' ? `Party Match · round ${g.round} of ${MATCH_ROUNDS}` : 'Quick Round');
+/** A chirp is playing, or waiting for the line to clear before it plays. */
+const sending = () => gate.busy || lineWait;
+/** Name of a seat for messages: "Bo", or "seat 3" when unknown. */
+const seatName = (g: Game, seat: number) => nameFor(g, seat) ?? `seat ${seat}`;
+/** "Bo's phone", or "the phone at seat 3" when the name is unknown. */
+const phoneOf = (g: Game, seat: number) => {
+  const name = nameFor(g, seat);
+  return name ? `${name}'s phone` : `the phone at seat ${seat}`;
+};
 
 function setAction(id: string, a: Action | null): (() => Promise<void> | void) | null {
   const b = $<HTMLButtonElement>(id);
   b.hidden = !a;
   b.textContent = a?.label ?? '';
-  b.disabled = !a || !!a.disabled || gate.busy;
+  b.disabled = !a || !!a.disabled || sending();
   return a?.run ?? null;
 }
 
@@ -259,8 +308,183 @@ function render() {
   if (inGame) renderGame(phase);
   if (phase === 'reveal') renderReveal();
   renderRecovery(phase);
-  ($('resend') as HTMLButtonElement).disabled = !state.lastSent || gate.busy;
+  ($('resend') as HTMLButtonElement).disabled = !state.lastSent || sending();
+  renderDeliveries();
+  renderUpdate(phase);
   renderDiagnostics(phase);
+}
+
+/** "Update available" with an explicit reload, never an automatic one. */
+function renderUpdate(phase: Phase) {
+  $('app-version').textContent = `Dial-Up Telephone ${APP_VERSION} · sound protocol v${PROTOCOL_VERSION}`;
+  show('version-warn', !!versionWarning);
+  $('version-warn').textContent = versionWarning ? `⚠ ${versionWarning}` : '';
+  show('update', !!applyUpdate);
+  if (!applyUpdate) return;
+  const a = updateAdvice({ inRound: IN_GAME.includes(phase) && phase !== 'ready', busyTurn: phase === 'my-turn', sending: sending() });
+  $('update-note').textContent = a.note;
+  ($('update-btn') as HTMLButtonElement).disabled = !a.enabled;
+}
+
+// ---------------------------------------------------------------- delivery of my chirps
+
+const STATE_LABEL: Record<Delivery['status'], string> = {
+  playing: '🔊 Playing',
+  waiting: '⏳ Waiting for confirmation',
+  confirmed: '✓ Confirmed',
+  unconfirmed: '⚠ No confirmation yet',
+};
+
+/** What to say about one delivery, and the retry it offers when it is not confirmed. */
+function deliveryView(d: Delivery): { text: string; retry: Action | null } {
+  const g = state.game;
+  const tryNote = d.status === 'playing' && d.attempts > 0 ? ` (automatic retry ${d.attempts} of ${d.maxAttempts - 1})` : '';
+  const failed = "It couldn't play: a sound problem on this phone, not static.";
+  if (d.kind === 'entry' && g) {
+    const hop = hopName(d.step);
+    const to = receiverSeat(g, d.step);
+    const target = to ? phoneOf(g, to) : 'the next phone';
+    const retry: Action = { label: '↻ Play my turn again', run: () => onResendEntry(d.step) };
+    if (d.status === 'playing') return { text: `Your ${hop}${tryNote}…`, retry: null };
+    if (d.status === 'waiting') return { text: `Your ${hop} played. Waiting for ${target} to confirm it arrived…`, retry: null };
+    if (d.status === 'confirmed') return { text: `${target} confirmed your ${hop} arrived.`, retry: null };
+    return { text: d.failed ? failed : `${target} hasn't confirmed your ${hop}. It may have missed the chirp.`, retry };
+  }
+  if (d.kind === 'start' && g) {
+    const pending = awaitingJoin(g).map((k) => seatName(g, k));
+    const joined = joinedSeats(g).map((k) => seatName(g, k));
+    const retry: Action = { label: '↻ Resend the start signal', run: onResendStart };
+    const got = joined.length ? ` Confirmed: ${joined.join(', ')}.` : '';
+    if (d.status === 'playing') return { text: `The start signal${tryNote}…`, retry: null };
+    if (d.status === 'waiting') return { text: `Start signal played. Waiting for ${pending.join(', ')} to confirm.${got}`, retry: null };
+    if (d.status === 'confirmed') return { text: 'Every phone confirmed the start signal.', retry: null };
+    return { text: d.failed ? failed : `No confirmation from ${pending.join(', ')}. They may have missed the start.${got}`, retry };
+  }
+  if (d.kind === 'results' && g) {
+    const pending = awaitingAcks(g).map((k) => seatName(g, k));
+    const retry: Action = { label: '↻ Send results again', run: onResendResults };
+    if (d.status === 'playing') return { text: `The results${tryNote}…`, retry: null };
+    if (d.status === 'waiting') return { text: `Results played. Waiting for ${pending.join(', ')} to confirm.`, retry: null };
+    if (d.status === 'confirmed') return { text: 'Every phone confirmed the results.', retry: null };
+    return { text: d.failed ? failed : `No confirmation from ${pending.join(', ')} yet.`, retry };
+  }
+  // A request for a missed hop, the reveal/results, or the start
+  const what = d.step === NEED_START ? 'the start signal' : d.step === 0 ? (d.wantsResults ? 'the results' : 'the reveal') : `hop ${d.step}`;
+  const from = d.step === NEED_START || d.step === 0 || !g ? "the host's phone" : `${who(g, d.step)}'s phone`;
+  const retry: Action =
+    d.step === NEED_START ? { label: '📣 Ask to join again', run: () => onAskToJoin(d.gameId) } : { label: '📣 Ask again', run: () => onAsk(d.step) };
+  if (d.status === 'playing') return { text: `Asking for ${what}…`, retry: null };
+  if (d.status === 'waiting') return { text: `Request played. Waiting for ${from} to answer with ${what}…`, retry: null };
+  if (d.status === 'confirmed') return { text: `${what[0].toUpperCase()}${what.slice(1)} arrived.`, retry: null };
+  return { text: d.failed ? failed : `No answer from ${from} yet. It may be too far away, or its microphone is off.`, retry };
+}
+
+function renderDeliveries() {
+  const list = $('delivery');
+  const now = performance.now();
+  const items = [...deliveries.values()].filter((d) => d.status !== 'confirmed' || now - (confirmedAt.get(d.kind) ?? now) < CONFIRMED_SHOWN_MS);
+  list.replaceChildren(
+    ...items.map((d) => {
+      const v = deliveryView(d);
+      const li = el('li', { className: d.status });
+      const p = el('span');
+      // Not playing yet while it waits for other phones' replies to finish.
+      const label = d.status === 'playing' && lineWait && !gate.busy ? '⏳ Waiting for the line to clear' : STATE_LABEL[d.status];
+      p.append(el('b', { className: 'state', textContent: label }), v.text);
+      li.append(p);
+      if (v.retry) {
+        const b = el('button', { type: 'button', className: 'small', textContent: v.retry.label, disabled: sending() });
+        b.addEventListener('click', guard(v.retry.run));
+        li.append(b);
+      }
+      return li;
+    }),
+  );
+  list.hidden = items.length === 0;
+}
+
+/** Re-check every delivery against what this phone has heard; start automatic retries that are due. */
+function refreshDeliveries() {
+  const now = performance.now();
+  for (const [kind, d] of deliveries) {
+    if (d.status === 'playing') continue; // in flight
+    const r = checkDelivery(d, state, now);
+    if (!r) {
+      deliveries.delete(kind);
+      confirmedAt.delete(kind);
+      continue;
+    }
+    if (r.delivery.status === 'confirmed' && d.status !== 'confirmed') confirmedAt.set(kind, now);
+    deliveries.set(kind, r.delivery);
+    if (r.retry) void autoRetry(kind);
+  }
+  window.clearTimeout(deliveryTimer);
+  const next = Math.min(
+    ...[...deliveries.values()].map((d) => (d.status === 'waiting' && d.deadline !== null ? d.deadline : Infinity)),
+    // re-render once when a confirmed line should disappear (only future times, or this would loop)
+    ...[...confirmedAt.values()].map((t) => t + CONFIRMED_SHOWN_MS).filter((t) => t > now),
+  );
+  if (Number.isFinite(next)) deliveryTimer = window.setTimeout(refreshDeliveries, Math.max(50, next - now + 50));
+  render();
+}
+
+type Build = () => { state: State; bytes: Uint8Array } | null;
+
+function retryBuild(d: Delivery): Build | null {
+  if (d.kind === 'entry') return () => resendEntry(state, d.step);
+  if (d.kind === 'start') return () => resendStart(state);
+  if (d.kind === 'results') return () => resendResults(state);
+  return null; // requests are repeated by a person, never automatically
+}
+
+const retryLabel: Record<DeliveryKind, string> = { entry: 'your turn', start: 'the start signal', results: 'the results', need: 'your request' };
+
+/** Play a chirp again because no confirmation came. Bounded by the delivery's attempts. */
+async function autoRetry(kind: DeliveryKind) {
+  const d = deliveries.get(kind);
+  const build = d && retryBuild(d);
+  if (!d || !build) return;
+  const r = await playOut(build, `${retryLabel[kind]} again: no confirmation yet (retry ${d.attempts} of ${d.maxAttempts - 1})`, 'Listening for the confirmation…', {
+    resend: true,
+  });
+  const cur = deliveries.get(kind) ?? d;
+  const now = performance.now();
+  if (r === 'ok') deliveries.set(kind, played(cur, now, state.game?.players ?? 2));
+  else if (r === 'failed') deliveries.set(kind, playFailed(cur));
+  else if (r === 'busy') deliveries.set(kind, postpone(cur, now, 1500));
+  else deliveries.delete(kind);
+  refreshDeliveries();
+}
+
+/**
+ * Play a chirp and track whether it arrives. `manual` = a retry button: one
+ * more play, no further automatic ones.
+ */
+async function trackSend(
+  kind: DeliveryKind,
+  step: number,
+  build: Build,
+  label: string,
+  after: string,
+  opts: { resend?: boolean; manual?: boolean; gameId?: number; wantsResults?: boolean } = {},
+): Promise<boolean> {
+  if (sending()) return false;
+  const prev = deliveries.get(kind);
+  const fresh = newDelivery(kind, opts.gameId ?? state.game?.gameId ?? 0, step, { wantsResults: opts.wantsResults });
+  const base = !opts.manual ? fresh : prev && prev.step === step && prev.gameId === fresh.gameId ? manualRetry(prev) : { ...fresh, maxAttempts: 1 };
+  deliveries.set(kind, base);
+  confirmedAt.delete(kind);
+  render();
+  const r = await playOut(build, label, after, { resend: opts.resend });
+  if (r === 'ok') {
+    // A start signal creates the round, so take the game ID after it played.
+    const gameId = opts.gameId ?? state.game?.gameId ?? base.gameId;
+    deliveries.set(kind, played({ ...base, gameId }, performance.now(), state.game?.players ?? 2));
+  } else if (r === 'failed') deliveries.set(kind, playFailed(base));
+  else if (prev) deliveries.set(kind, prev);
+  else deliveries.delete(kind);
+  refreshDeliveries();
+  return r === 'ok';
 }
 
 function renderAudio(phase: Phase) {
@@ -338,7 +562,8 @@ function renderHost() {
       if (x.status === 'host') text = `${x.names[0]} (you, host)`;
       else if (x.status === 'ready') text = x.names[0];
       else if (x.status === 'missing') text = 'not ready yet';
-      else if (x.status === 'duplicate') text = `${x.names.join(' and ')} both picked it`;
+      else if (x.status === 'duplicate')
+        text = new Set(x.names.map((n) => n.toLowerCase())).size === x.names.length ? `${joinNames(x.names)} ${x.names.length === 2 ? 'both' : 'all'} picked it` : `${x.names.length} phones (${joinNames(x.names)}) picked it`;
       else text = `${x.names[0]} (outside a ${hostPlayers}-player game)`;
       const mark = { host: '☎️', ready: '✓', missing: '…', duplicate: '⚠', extra: '⚠' }[x.status];
       li.append(el('span', { className: 'seat', textContent: `Seat ${x.seat}` }), el('span', { textContent: text }), el('span', { className: 'mark', textContent: mark }));
@@ -352,12 +577,14 @@ function renderHost() {
   else if (r.missing.length) note = `Waiting for seat ${r.missing.join(', ')}. They tap I'm ready and allow the microphone. Then tap Check who's ready.`;
   else if (r.extra.length) note = `Seat ${r.extra.join(', ')} is outside this game. Raise the player count, or ask them to pick a lower seat.`;
   else note = 'Everyone is ready.';
+  // Same names on different seats are fine: every phone is tracked by its own ID and seat.
+  if (r.sameName.length) note += ` ${r.sameName.map((n) => `More than one player is called ${n}.`).join(' ')} Seat numbers tell them apart.`;
   $('roster-note').textContent = note;
-  ($('check') as HTMLButtonElement).disabled = gate.busy || listeningForAnswers;
+  ($('check') as HTMLButtonElement).disabled = sending() || listeningForAnswers;
 
   const start = $<HTMLButtonElement>('start');
   const modeName = hostMode === 'match' ? 'Party Match' : 'Quick Round';
-  start.disabled = gate.busy || !r.canStart;
+  start.disabled = sending() || !r.canStart;
   start.textContent = r.canStart
     ? `Start ${modeName} · ${hostPlayers} players`
     : r.duplicate.some((k) => k <= hostPlayers)
@@ -392,7 +619,8 @@ function renderLine(g: Game | null) {
         el('small', { className: 'sub', textContent: known ? `seat ${seat} · hop ${k} · ${role}` : `hop ${k} · ${role}` }),
       );
       let st = '';
-      if (done && k === me) st = confirmedHop(g, k) ? '✓ received' : '♪ played';
+      // "Received" needs evidence from the next phone; playback alone only means "played".
+      if (done && k === me) st = hopDelivered(g, k) ? '✓ received' : '♪ played, not confirmed yet';
       else if (done) st = `✓ ${verb(k, true)}`;
       else if (missed.includes(k)) st = '⚠ missed here';
       else if (k === now) st = `${isDrawingStep(k) ? '✏️' : '💬'} ${verb(k, false)}…`;
@@ -403,7 +631,7 @@ function renderLine(g: Game | null) {
   show('conflict', !!g.conflict);
   if (g.conflict) $('conflict').textContent = `⚠ ${g.conflict} also sent the turn for your seat. Two phones may have picked seat ${g.seat}: check seat numbers out loud.`;
   show('resend-start', g.seat === 1 && !g.revealed);
-  ($('resend-start') as HTMLButtonElement).disabled = gate.busy;
+  ($('resend-start') as HTMLButtonElement).disabled = sending();
 }
 
 function renderGame(phase: Phase) {
@@ -501,19 +729,22 @@ function renderGame(phase: Phase) {
       wait = `If ${who(g, prev)} already sent, tap Ask for it by sound.`;
       secondary = { label: '📣 Ask for it by sound', run: () => onAsk(prev) };
     } else if (phase === 'sent') {
+      const confirmed = hopDelivered(g, me);
+      const to = receiverSeat(g, me);
+      const target = to ? phoneOf(g, to) : 'the next phone';
       if (me === N) {
         title = 'You played the last hop!';
-        text = `The host (${g.host}) reveals the chain next. Keep listening.`;
-        wait = 'Listening for the reveal…';
+        text = confirmed
+          ? `${to ? `✓ ${target} confirmed it arrived. ` : ''}The host (${g.host}) reveals the chain next. Keep listening.`
+          : `Your chirp played. Waiting for ${target} to confirm it arrived…`;
+        wait = confirmed ? 'Listening for the reveal…' : 'This phone plays it again by itself if no confirmation comes. You can also tap Play my turn again.';
       } else {
-        const next = who(g, me + 1);
-        const confirmed = confirmedHop(g, me);
         const now = currentStep(g);
         title = confirmed ? 'Received! Keep it secret' : 'Played! Keep it secret';
         text = confirmed
-          ? `✓ ${next} received your ${hopName(me)} and played their turn.`
-          : `Your chirp played. It's confirmed when ${next}'s turn is heard.${now && now > me ? ` Now ${who(g, now)} is ${verb(now, false)}.` : ''}`;
-        wait = confirmed ? 'Listening…' : `If ${next} didn't get it, tap Play my turn again.`;
+          ? `✓ ${target} confirmed your ${hopName(me)} arrived.${now && now > me ? ` Now ${who(g, now)} is ${verb(now, false)}.` : ''}`
+          : `Your chirp played. Waiting for ${target} to confirm it arrived…`;
+        wait = confirmed ? 'Listening…' : 'This phone plays it again by itself if no confirmation comes. You can also tap Play my turn again.';
       }
       secondary = { label: '↻ Play my turn again', run: () => onResendEntry(me) };
     } else if (phase === 'missing') {
@@ -628,7 +859,7 @@ function renderRecovery(phase: Phase) {
   const items: HTMLLIElement[] = [];
   const add = (text: string, label: string, run: () => Promise<void> | void) => {
     const li = el('li');
-    const b = el('button', { type: 'button', className: 'small', textContent: label, disabled: gate.busy });
+    const b = el('button', { type: 'button', className: 'small', textContent: label, disabled: sending() });
     b.addEventListener('click', guard(run));
     li.append(el('span', { textContent: text }), b);
     items.push(li);
@@ -645,14 +876,15 @@ function renderRecovery(phase: Phase) {
       add('The host sent the results but they are not showing?', 'Ask for the results', () => onAsk(0));
     }
     if (g.revealed && missedStart !== null && missedStart !== g.gameId) {
-      add('A new round started without you.', '📣 Ask to join', onAskToJoin);
+      const id = missedStart;
+      add('A new round started without you.', '📣 Ask to join', () => onAskToJoin(id));
     }
     if (relayOffer && relayOffer.gameId === g.gameId && canRelay(state, relayOffer.step)) {
       relay = true;
       const author = who(g, relayOffer.step);
       $('relay-text').textContent = `Someone asked for hop ${relayOffer.step}. ${author}'s phone should answer by itself in a moment.`;
       $('relay').textContent = `Send it for them (only if ${author} doesn't answer)`;
-      ($('relay') as HTMLButtonElement).disabled = gate.busy;
+      ($('relay') as HTMLButtonElement).disabled = sending();
     }
   }
   list.replaceChildren(...items);
@@ -804,6 +1036,33 @@ function fillSelect(sel: HTMLSelectElement, steps: number[], g: Game) {
   );
 }
 
+/**
+ * A scoreboard with competition ranks (5, 5, 3 → 1, 1, 3). Everyone ranked
+ * first looks the same, and a tie for first says so: list order never breaks a tie.
+ */
+function renderBoard(list: HTMLElement, topLine: HTMLElement, rows: { seat: number; name: string; points: number; notes?: string[] }[], final: boolean) {
+  const ranked = competitionRanks(rows);
+  const top = ranked.filter((r) => r.top).map((r) => r.item);
+  const joint = top.length > 1;
+  const names = winnerNames(top, rows);
+  topLine.hidden = top.length === 0;
+  topLine.textContent = joint ? `🏆 ${final ? 'Joint winners' : 'Tied for first'}: ${joinNames(names)}` : top.length ? `🏆 ${final ? 'Winner' : 'In the lead'}: ${names[0]}` : '';
+  list.replaceChildren(
+    ...ranked.map((r) => {
+      const s = r.item;
+      const li = el('li', { className: r.top ? 'top' : '' });
+      const rank = el('span', { className: 'rank', textContent: String(r.rank) });
+      rank.setAttribute('aria-label', `Rank ${r.rank}${r.tied ? ', tied' : ''}`);
+      const whoEl = el('span', { className: 'who' });
+      whoEl.append(`${s.name} · seat ${s.seat}`);
+      if (r.top && joint) whoEl.append(el('span', { className: 'tag', textContent: final ? 'Joint winner' : 'Tied for first' }));
+      if (s.notes?.length) whoEl.append(el('span', { className: 'notes', textContent: s.notes.join(' · ') }));
+      li.append(rank, whoEl, el('span', { className: 'pts', textContent: `${s.points} pt${s.points === 1 ? '' : 's'}` }));
+      return li;
+    }),
+  );
+}
+
 function renderReveal() {
   const g = state.game!;
   const c = chain(g);
@@ -848,14 +1107,16 @@ function renderReveal() {
       $('awards-text').textContent = awardsSummary(g);
       show('results-form', false);
       if (host) {
-        const confirmed = (g.acks ?? []).map((k) => `${nameOfSeat(g, k, myName()) ?? `seat ${k}`} ✓`);
-        const pending = waiting.map((k) => nameOfSeat(g, k, myName()) ?? `seat ${k}`);
+        const confirmed = (g.acks ?? []).map((k) => `${seatName(g, k)} ✓`);
+        const pending = waiting.map((k) => seatName(g, k));
         $('acks').textContent = pending.length
-          ? `Results sent. ${confirmed.length ? `Confirmed: ${confirmed.join(' · ')}. ` : ''}Waiting for ${pending.join(', ')}.`
-          : '✓ Results sent and confirmed by every phone.';
-        ($('resend-results') as HTMLButtonElement).disabled = gate.busy;
+          ? `Results played. ${confirmed.length ? `Confirmed: ${confirmed.join(' · ')}. ` : ''}Waiting for confirmation from ${pending.join(', ')}.`
+          : '✓ Results played and confirmed by every phone.';
+        ($('resend-results') as HTMLButtonElement).disabled = sending();
       } else {
-        $('acks').textContent = confirmedHere ? '✓ Results received. Your phone confirmed them to the host.' : '✓ Results received. Your phone confirms them to the host in a moment…';
+        $('acks').textContent = confirmedHere
+          ? '✓ Results received. Your phone played its confirmation to the host.'
+          : '✓ Results received. Your phone confirms them to the host in a moment…';
       }
     } else if (host) {
       $('awards-text').textContent = 'Awards are optional. Each one is worth 1 point.';
@@ -874,7 +1135,7 @@ function renderReveal() {
       const picked = v('aw-funniest') + v('aw-recognizable') + (o.recovery.length ? v('aw-recovery') : 0) > 0;
       const needGuess = o.finalGuess && ($('aw-final') as HTMLSelectElement).value === '';
       const send = $<HTMLButtonElement>('send-results');
-      send.disabled = gate.busy || needGuess;
+      send.disabled = sending() || needGuess;
       send.textContent = needGuess ? 'Answer the room guess first' : picked ? 'Send results' : 'Send results (no awards)';
     } else {
       $('awards-text').textContent = 'Vote out loud for the awards! The host sends the results to every phone. Keep listening.';
@@ -886,16 +1147,7 @@ function renderReveal() {
   show('scores-box', all);
   if (all) {
     $('scores-title').textContent = g.results ? 'Scores this round' : 'Scores so far (awards still to come)';
-    $('scores').replaceChildren(
-      ...scores(g).map((s) => {
-        const li = el('li');
-        const left = el('span');
-        left.append(`${s.name} · seat ${s.seat}`);
-        if (s.notes.length) left.append(el('span', { className: 'notes', textContent: s.notes.join(' · ') }));
-        li.append(left, el('span', { className: 'pts', textContent: `${s.points} pt${s.points === 1 ? '' : 's'}` }));
-        return li;
-      }),
-    );
+    renderBoard($('scores'), $('scores-top'), scores(g), !!g.results);
     $('scores-note').textContent =
       'A guess that matches what the drawer was given scores 1 point for both. ' +
       (g.players % 2 === 1 ? 'The room guessing the last drawing scores 1 for its drawer. ' : '') +
@@ -908,23 +1160,19 @@ function renderReveal() {
   if (all && g.mode === 'match') {
     const m = matchStandings(state);
     $('match-title').textContent = over ? 'Final Party Match totals' : `Party Match totals after round ${g.round} of ${MATCH_ROUNDS}`;
-    $('standings').replaceChildren(
-      ...m.standings.map((s) => {
-        const li = el('li');
-        li.append(el('span', { textContent: `${s.name} · seat ${s.seat}` }), el('span', { className: 'pts', textContent: `${s.points} pt${s.points === 1 ? '' : 's'}` }));
-        return li;
-      }),
-    );
+    renderBoard($('standings'), $('standings-top'), m.standings, over);
   }
   show('final-box', all && over);
   if (all && over) {
     const m = matchStandings(state).standings;
-    const top = m.length ? m[0].points : 0;
-    const winners = m.filter((s) => s.points === top).map((s) => s.name);
+    const winners = topRanked(m);
+    const top = winners[0]?.points ?? 0;
+    const pts = `${top} point${top === 1 ? '' : 's'}`;
+    const names = winnerNames(winners, m);
     $('final-text').textContent =
       winners.length === 1
-        ? `🏆 ${winners[0]} wins the Party Match with ${top} point${top === 1 ? '' : 's'}!`
-        : `🏆 It's a tie! ${winners.join(' and ')} share the win with ${top} point${top === 1 ? '' : 's'} each.`;
+        ? `🏆 ${names[0]} wins the Party Match with ${pts}!`
+        : `🏆 Joint winners! ${joinNames(names)} share the Party Match with ${pts} each.`;
   }
 
   const s = state.stats;
@@ -973,7 +1221,7 @@ function renderReveal() {
   }
   again.hidden = !againRun;
   again.textContent = label;
-  again.disabled = disabled || gate.busy;
+  again.disabled = disabled || sending();
   again.className = all ? 'primary' : '';
   $('again-note').textContent = note;
 }
@@ -988,6 +1236,9 @@ function renderDiagnostics(phase: Phase) {
     'audio engine': window.ggwave_factory ? 'ggwave loaded' : 'MISSING vendor/ggwave.js',
     game: g ? `${g.gameId} (${g.players} players, ${g.mode} round ${g.round}, my hop ${myStep(g)})` : '-',
     'seen / retired': `${state.seen.length} / ${state.retired.length}`,
+    'app version': `${APP_VERSION} · protocol v${PROTOCOL_VERSION}`,
+    'player ID': String(state.profile.pid),
+    deliveries: [...deliveries.values()].map((d) => `${d.kind} ${d.step}: ${d.status} (${d.attempts}/${d.maxAttempts})`).join(', ') || '-',
     ...metrics,
   };
   $('diag').replaceChildren(...Object.entries(rows).flatMap(([k, v]) => [el('dt', { textContent: k }), el('dd', { textContent: v })]));
@@ -1084,20 +1335,59 @@ function playFx(list: Effect[]) {
 }
 
 /**
- * Play the chirp, then commit. Nothing is committed if playback fails. The
- * dial-up handshake only plays before a fresh start signal (R4.1).
+ * Wait while other phones are expected to answer automatically (reply slots
+ * after a start, results, ready check, hop, or request), so a new chirp
+ * never talks over them. Bounded, so a busy room can't block a send forever.
  */
-async function playOut(out: { state: State; bytes: Uint8Array }, label: string, after: string, opts: { resend?: boolean; scheduled?: boolean } = {}): Promise<boolean> {
-  if (gate.busy) return false;
+async function lineClear() {
+  const until = performance.now() + LINE_WAIT_MAX_MS;
+  let told = false;
+  while ((performance.now() < quietUntil || gate.busy) && performance.now() < until) {
+    if (!told && performance.now() < quietUntil) {
+      setStatus('Waiting a moment: other phones are answering. Your chirp plays when the line is clear.');
+      told = true;
+    }
+    await sleep(Math.min(500, Math.max(50, quietUntil - performance.now() + 100)));
+  }
+}
+
+/** 'ok' played · 'busy' another chirp was playing · 'failed' a sound problem · 'nothing' there was nothing to send. */
+type PlayResult = 'ok' | 'busy' | 'failed' | 'nothing';
+
+/**
+ * Play a chirp, then commit. Nothing is committed if playback fails. The
+ * chirp is built only once the line is clear, from the state at that moment,
+ * so chirps heard while waiting are never lost. The dial-up handshake only
+ * plays before a fresh start signal (R4.1).
+ *
+ * `scheduled` = an automatic reply in its own slot: it plays at once, and
+ * `quiet` keeps the status line for the message the player is reading.
+ */
+async function playOut(build: Build, label: string, after: string, opts: { resend?: boolean; scheduled?: boolean; quiet?: boolean } = {}): Promise<PlayResult> {
+  if (gate.busy || (lineWait && !opts.scheduled)) return 'busy';
   let audio;
   try {
     audio = await ensureAudio();
   } catch (err) {
     audioFailed(err);
-    return false;
+    return 'failed';
   }
-  // A scheduled reply must start in its own slot; no effects play on those events anyway.
-  if (!opts.scheduled) await effectsDone();
+  if (!opts.scheduled) {
+    lineWait = true;
+    render();
+    try {
+      await effectsDone();
+      await lineClear();
+    } finally {
+      lineWait = false;
+    }
+  }
+  if (gate.busy) return 'busy';
+  const out = build();
+  if (!out) {
+    render();
+    return 'nothing';
+  }
   stopListening(false);
   const decoded = decodePacket(out.bytes);
   const type = decoded.ok ? decoded.packet.type : 'unknown';
@@ -1111,7 +1401,7 @@ async function playOut(out: { state: State; bytes: Uint8Array }, label: string, 
   if (decoded.ok) $('chirp-info').textContent = `Inside the last chirp: ${describePacket(decoded.packet, out.bytes.length)} → ${(ms / 1000).toFixed(1)} s of sound`;
   audio.viz.setMode('send');
   setAudio('playing');
-  setStatus(`🔊 Playing ${label}… keep the room quiet.`);
+  if (!opts.quiet) setStatus(`🔊 Playing ${label}… keep the room quiet.`);
   const res = await gate.run(
     out,
     async () => {
@@ -1122,33 +1412,36 @@ async function playOut(out: { state: State; bytes: Uint8Array }, label: string, 
   );
   audio.viz.setMode('idle');
   if (!res.ok) {
-    const why = res.reason === 'failed' && res.error instanceof Error ? res.error.message : 'unknown error';
+    if (res.reason === 'busy') return 'busy';
+    const why = res.error instanceof Error ? res.error.message : 'unknown error';
     setAudio('off');
     setStatus(`The chirp couldn't play (${why}). This is a sound problem, not static. Nothing changed: press the button again to retry.`, 'error');
-    return false;
+    return 'failed';
   }
-  setStatus(`Played ${label}. ${after}`);
+  // Everyone else answers this chirp automatically now: keep the line free for them.
+  if (decoded.ok) quietUntil = Math.max(quietUntil, performance.now() + replyWindowMs(decoded.packet, state.game?.players ?? null));
+  if (!opts.quiet) setStatus(`Played ${label}. ${after}`);
   await startListening(false);
-  return true;
+  return 'ok';
 }
 
-async function send(out: Outgoing | null, label: string, after: string, opts: { resend?: boolean } = {}): Promise<boolean> {
-  return out ? playOut(out, label, after, opts) : false;
+/** Play a chirp that needs no delivery tracking (it is confirmed some other way, or not at all). */
+async function send(build: Build, label: string, after: string, opts: { resend?: boolean } = {}): Promise<boolean> {
+  return (await playOut(build, label, after, opts)) === 'ok';
 }
 
 /**
  * Play an automatic reply in this phone's time slot (see src/game/schedule.ts).
  * If the phone is busy when its slot comes, the reply is skipped rather than
- * delayed into someone else's slot; the asker can simply ask again.
+ * delayed into someone else's slot; the sender's own retry repairs it.
  */
-function replyInSlot(delayMs: number, build: () => Outgoing | null, label: string, after: string) {
+function replyInSlot(delayMs: number, build: () => Outgoing | null, label: string, after: string, opts: { quiet?: boolean } = {}) {
   window.setTimeout(() => {
     if (gate.busy || audioState === 'playing') {
-      setStatus('This phone was busy when its turn to answer came. Ask the host to check again.');
+      if (!opts.quiet) setStatus('This phone was busy when its turn to answer came. The other phone will ask again.');
       return;
     }
-    const out = build();
-    if (out) void playOut(out, label, after, { resend: true, scheduled: true });
+    void playOut(build, label, after, { resend: true, scheduled: true, quiet: opts.quiet });
   }, delayMs);
 }
 
@@ -1159,8 +1452,11 @@ function eventMessage(e: ReceiveEvent): [string, Tone, Effect[]] | null {
   switch (e.type) {
     case 'joined': {
       const what = e.mode === 'match' ? `round ${e.round} of ${MATCH_ROUNDS} of a Party Match` : 'a Quick Round';
+      // The jingle (0.65 s) ends before the first confirmation slot (0.9 s).
       return [`Connected! ${e.host} started ${what} for ${e.players} players on a ${NOISE_INFO[e.noise].name.toLowerCase()} line. You are seat ${e.seat}.`, 'ok', ['arrive']];
     }
+    case 'start-again':
+      return [`Heard the start signal again. Nothing changed.${e.ackIn !== null ? ' This phone confirms again in its turn.' : ''}`, 'info', []];
     case 'not-ready':
       return [`${e.host} started a game, but you're not ready yet. Pick your seat, press I'm ready, then ask ${e.host} to resend the start signal.`, 'error', []];
     case 'seat-too-high':
@@ -1171,6 +1467,7 @@ function eventMessage(e: ReceiveEvent): [string, Tone, Effect[]] | null {
       if (!g) return null;
       if (e.recovered) return [`Recovered hop ${e.step} from ${e.name}. The reveal now shows it.`, 'ok', ['arrive']];
       const me = myStep(g);
+      // The jingle (≤ 0.75 s) ends before this phone's "got it" (0.9 s after the chirp).
       if (e.forMe) return [`${e.name}'s ${hopName(e.step)} arrived. Your turn!`, 'ok', ['arrive']];
       if (e.step === me + 1) return [`✓ Confirmed: ${e.name} received your ${hopName(me)} and played their turn.`, 'ok', []];
       if (e.last && g.seat === 1) {
@@ -1196,8 +1493,15 @@ function eventMessage(e: ReceiveEvent): [string, Tone, Effect[]] | null {
         return e.clash ? [`⚠ Two phones say they are seat ${e.seat}. One of them should change seat.`, 'error', []] : [`✓ ${e.name} is ready (seat ${e.seat}).`, 'ok', []];
       }
       return e.clash ? [`⚠ ${e.name} also picked seat ${e.seat}. One of you: tap Change my seat.`, 'error', []] : null;
-    case 'ack':
-      return [`✓ Seat ${e.seat} confirmed the results.`, 'ok', []];
+    case 'ack': {
+      if (!g) return null;
+      const name = seatName(g, e.seat);
+      if (e.step === ACK_RESULTS) return [`✓ ${name} (seat ${e.seat}) confirmed the results.`, 'ok', []];
+      if (e.step === NEED_START) return [`✓ ${name} (seat ${e.seat}) confirmed the start signal.`, 'ok', []];
+      // A "got it" for my own hop; others' receipts need no message.
+      if (e.step === myStep(g)) return [`✓ ${phoneOf(g, e.seat)} confirmed your ${hopName(e.step)} arrived.`, 'ok', []];
+      return null;
+    }
     case 'missed-start':
       return ['A round started without you. Tap Ask to join.', 'error', []];
     case 'need':
@@ -1246,7 +1550,8 @@ async function answerNow(packets: Packet[], tries: number) {
   for (const p of packets) {
     if (state.game?.gameId !== p.gameId) return;
     const label = p.type === 'entry' ? 'your turn again' : p.type === 'reveal' ? 'the reveal again' : p.type === 'start' ? 'the start signal again' : 'the results again';
-    if (!(await playOut(outgoingFor(state, p), label, 'Listening…', { resend: true }))) return;
+    // The asker and the room are waiting for exactly this answer, so it doesn't wait for a quiet line.
+    if ((await playOut(() => outgoingFor(state, p), label, 'Listening…', { resend: true, scheduled: true })) !== 'ok') return;
   }
 }
 
@@ -1256,10 +1561,19 @@ function onDecoded(bytes: Uint8Array) {
   const result = decodePacket(bytes);
   if (!result.ok) {
     metrics['last rx error'] = result.error;
+    if (result.error === 'old-version' || result.error === 'new-version') {
+      // Never misread: tell the room to update instead.
+      versionWarning = versionMismatchText(result.error);
+      setStatus(versionWarning, 'error');
+      render();
+      return;
+    }
     setStatus("Heard a chirp but couldn't read it (a sound problem, not static). Nothing changed. Tap Ask for it by sound if you're waiting.", 'error');
     return;
   }
   const p = result.packet;
+  // Other phones may answer this chirp automatically: keep the line free for them.
+  quietUntil = Math.max(quietUntil, performance.now() + replyWindowMs(p, state.game?.players ?? null));
   const { state: next, event } = receive(state, p, Date.now());
   metrics['last rx event'] = event.type;
   $('chirp-info').textContent = `Inside the last chirp heard: ${describePacket(p, bytes.length)}`;
@@ -1284,6 +1598,15 @@ function onDecoded(bytes: Uint8Array) {
   if (event.type === 'results' && event.ackIn !== null) {
     replyInSlot(event.ackIn, () => ackPacket(state), 'your results confirmation', 'Listening…');
   }
+  // Confirm the start to the host, in this seat's slot (again for a repeated start, until my hop is played).
+  if ((event.type === 'joined' || event.type === 'start-again') && event.ackIn !== null) {
+    replyInSlot(event.ackIn, () => startAckPacket(state), 'your “I’m in” confirmation', '', { quiet: true });
+  }
+  // The next player says "got it" for every copy of a hop it holds, so a lost "got it" is repaired by the author's retry.
+  if (p.type === 'entry' && (event.type === 'entry' || event.type === 'duplicate' || event.type === 'ignored') && receiptPacket(state, p.step)) {
+    const step = p.step;
+    replyInSlot(RECEIPT_DELAY_MS, () => receiptPacket(state, step), `“got it” for hop ${step}`, '', { quiet: true });
+  }
   if (event.type === 'need') {
     if (!scheduleAnswer(event.step)) {
       if (canRelay(state, event.step)) {
@@ -1293,7 +1616,7 @@ function onDecoded(bytes: Uint8Array) {
         setStatus('Someone asked for a missed hop. Their phone is waiting for the answer.');
       }
     }
-    render();
+    refreshDeliveries();
     return;
   }
   const m = eventMessage(event);
@@ -1301,7 +1624,7 @@ function onDecoded(bytes: Uint8Array) {
     setStatus(m[0], m[1]);
     playFx(m[2]);
   }
-  render();
+  refreshDeliveries();
 }
 
 // ---------------------------------------------------------------- actions
@@ -1312,24 +1635,40 @@ function resetRoundUi() {
   relayOffer = null;
   draftFor = '';
   ($('guess') as HTMLInputElement).value = '';
+  clearDeliveries();
+}
+
+function clearDeliveries() {
+  deliveries.clear();
+  confirmedAt.clear();
+  window.clearTimeout(deliveryTimer);
 }
 
 async function onStart() {
-  const out = startGame(state, { players: hostPlayers, gameId: randomU16(), now: Date.now(), noise: hostNoise, mode: hostMode, category: hostCategory });
+  const opts = { players: hostPlayers, gameId: randomU16(), noise: hostNoise, mode: hostMode, category: hostCategory };
+  const build = () => startGame(state, { ...opts, now: Date.now() });
   resetRoundUi();
-  // "Played" is all the host knows: a phone joins when it hears the start, and the line shows ✓ as turns arrive.
-  await send(out, 'the start signal', 'Each phone joins when it hears it. Now pick your word and draw it!');
+  // "Played" is all the host knows: each phone confirms the start in its own slot.
+  await trackSend('start', 0, build, 'the start signal', 'Each phone confirms when it hears it. Now pick your word and draw it!');
+}
+
+async function onResendStart() {
+  await trackSend('start', 0, () => resendStart(state), 'the start signal again', 'Late players who are ready can join now.', { resend: true, manual: true });
 }
 
 async function onHello() {
-  await send(helloPacket(state), 'your ready message', "The host's screen shows it when it arrives.", { resend: true });
+  await send(() => helloPacket(state), 'your ready message', "The host's screen shows it when it arrives.", { resend: true });
 }
 
 async function onCheck() {
-  const out = callPacket(state, hostPlayers);
-  if (!out || out.packet.type !== 'call') return;
-  const { confirmed, duplicate } = out.packet;
-  if (await send(out, "the ready check", 'Players who are not confirmed answer one at a time.', { resend: true })) {
+  let masks: { confirmed: number; duplicate: number } | null = null;
+  const build = () => {
+    const out = callPacket(state, hostPlayers);
+    if (out?.packet.type === 'call') masks = { confirmed: out.packet.confirmed, duplicate: out.packet.duplicate };
+    return out;
+  };
+  if ((await send(build, 'the ready check', 'Players who are not confirmed answer one at a time.', { resend: true })) && masks) {
+    const { confirmed, duplicate } = masks;
     checkUntil = performance.now() + callWindowMs(confirmed, duplicate);
     window.clearTimeout(checkTimer);
     checkTimer = window.setTimeout(() => render(), checkUntil - performance.now() + 50);
@@ -1337,68 +1676,91 @@ async function onCheck() {
   }
 }
 
-async function onAskToJoin() {
-  const id = missedStart;
+async function onAskToJoin(id: number | null = missedStart) {
   if (id === null) return;
-  if (await send(askToJoin(state, id), 'a request to join', "The host's phone sends the start signal in a moment.", { resend: true })) missedStart = null;
+  const ok = await trackSend('need', NEED_START, () => askToJoin(state, id), 'a request to join', "The host's phone sends the start signal in a moment.", {
+    resend: true,
+    gameId: id,
+    manual: deliveries.get('need')?.step === NEED_START,
+  });
+  if (ok) missedStart = null;
   render();
 }
 
 async function onNextRound() {
-  const out = nextRound(state, randomU16(), Date.now());
-  if (!out) return;
+  const id = randomU16();
+  const preview = nextRound(state, id, Date.now());
+  if (!preview) return;
   resetRoundUi();
-  const g = out.state.game!;
+  const g = preview.state.game!;
   const first = seatOfStep(g, 1);
-  await send(out, `the start of round ${g.round}`, first === 1 ? 'You draw first this round.' : `Seat ${first} draws first this round.`);
+  await trackSend('start', 0, () => nextRound(state, id, Date.now()), `the start of round ${g.round}`, first === 1 ? 'You draw first this round.' : `Seat ${first} draws first this round.`);
 }
 
-/** "Played" is not "received": the next player's turn confirms it (R4.4). */
+/** "Played" is not "received": the next player's "got it" confirms it (R4.4). */
 function afterEntryText(g: Game): string {
-  const me = myStep(g);
-  return me >= g.players ? 'That was the last hop. Keep it secret until the reveal!' : `It's confirmed when ${who(g, me + 1)}'s turn is heard. Keep it secret!`;
+  const to = receiverSeat(g, myStep(g));
+  return to ? `Waiting for ${phoneOf(g, to)} to confirm it arrived. Keep it secret!` : 'That was the last hop. Keep it secret until the reveal!';
 }
 
 async function onSendDrawing() {
-  if (!editor || !state.game) return;
-  const out = sendEntry(state, { drawing: editor.grid.map((r) => [...r]) });
-  if (out) await playOut(out, 'your drawing', afterEntryText(state.game));
+  const g = state.game;
+  if (!editor || !g) return;
+  const drawing = editor.grid.map((r) => [...r]);
+  await trackSend('entry', myStep(g), () => sendEntry(state, { drawing }), 'your drawing', afterEntryText(g));
 }
 
 async function onSendGuess() {
-  if (!state.game) return;
-  const out = sendEntry(state, { text: ($('guess') as HTMLInputElement).value });
-  if (!out) return;
-  if (await playOut(out, 'your guess', afterEntryText(state.game))) ($('guess') as HTMLInputElement).value = '';
+  const g = state.game;
+  if (!g) return;
+  const text = ($('guess') as HTMLInputElement).value;
+  if (!sendEntry(state, { text })) return;
+  if (await trackSend('entry', myStep(g), () => sendEntry(state, { text }), 'your guess', afterEntryText(g))) ($('guess') as HTMLInputElement).value = '';
 }
 
 async function onReveal(force: boolean) {
   stopShow();
   revealShown = 1;
-  await send(revealGame(state, Date.now(), force), 'the reveal', 'Every phone that heard it now shows the chain.');
+  await send(() => revealGame(state, Date.now(), force), 'the reveal', 'Every phone that heard it now shows the chain.');
 }
 
 async function onAsk(step: number) {
   const g = state.game;
   if (!g) return;
   const after = step === 0 ? "The host's phone answers in a moment." : `${who(g, step)}'s phone answers in a moment, if it already played that hop.`;
-  await send(askFor(state, step), step === 0 ? 'a request for the reveal' : `a request for hop ${step}`, after, { resend: true });
+  const prev = deliveries.get('need');
+  await trackSend('need', step, () => askFor(state, step), step === 0 ? 'a request for the reveal' : `a request for hop ${step}`, after, {
+    resend: true,
+    wantsResults: step === 0 && g.revealed,
+    manual: prev?.step === step && prev.gameId === g.gameId,
+  });
 }
 
 async function onRelay() {
   const offer = relayOffer;
   if (!offer) return;
   relayOffer = null;
-  await send(resendEntry(state, offer.step), `hop ${offer.step} for the room`, 'Listening…', { resend: true });
+  await send(() => resendEntry(state, offer.step), `hop ${offer.step} for the room`, 'Listening…', { resend: true });
 }
 
 async function onResendEntry(step: number) {
-  await send(resendEntry(state, step), 'your turn again', 'Listening…', { resend: true });
+  await trackSend('entry', step, () => resendEntry(state, step), 'your turn again', 'Listening for the confirmation…', { resend: true, manual: true });
+}
+
+async function onResendResults() {
+  await trackSend('results', 0, () => resendResults(state), 'the results again', 'Phones confirm in turn.', { resend: true, manual: true });
 }
 
 async function onResend() {
-  const bytes = resendBytes(state);
-  if (bytes) await playOut({ state, bytes }, 'the same chirp again', 'Listening…', { resend: true });
+  await send(
+    () => {
+      const bytes = resendBytes(state);
+      return bytes ? { state, bytes } : null;
+    },
+    'the same chirp again',
+    'Listening…',
+    { resend: true },
+  );
 }
 
 function onAgain(endMatch: boolean) {
@@ -1513,7 +1875,7 @@ $('guess').addEventListener('keydown', (e) => {
 $('primary').addEventListener('click', guard(() => currentPrimary?.()));
 $('secondary').addEventListener('click', guard(() => currentSecondary?.()));
 $('tertiary').addEventListener('click', guard(() => currentTertiary?.()));
-$('resend-start').addEventListener('click', guard(() => send(resendStart(state), 'the start signal again', 'Late players who are ready can join now.', { resend: true })));
+$('resend-start').addEventListener('click', guard(onResendStart));
 $('relay').addEventListener('click', guard(onRelay));
 
 // Odd player counts: the room's out-loud guess
@@ -1553,13 +1915,12 @@ $('results-form').addEventListener(
     e.preventDefault();
     const v = (id: string) => Number(($(id) as HTMLSelectElement).value) || 0;
     const final = (awardOptions(state.game!).finalGuess ? v('aw-final') : 0) as FinalGuess;
-    guard(() =>
-      send(sendResults(state, { funniest: v('aw-funniest'), recognizable: v('aw-recognizable'), recovery: v('aw-recovery'), final }), 'the awards', 'Every phone that hears it shows the same scores.'),
-    )();
+    const r = { funniest: v('aw-funniest'), recognizable: v('aw-recognizable'), recovery: v('aw-recovery'), final };
+    guard(() => trackSend('results', 0, () => sendResults(state, r), 'the awards', 'Every phone that hears it shows the same scores and confirms in turn.'))();
   },
 );
 $('results-form').addEventListener('change', () => render());
-$('resend-results').addEventListener('click', guard(() => send(resendResults(state), 'the results again', 'Phones that missed them confirm in turn.', { resend: true })));
+$('resend-results').addEventListener('click', guard(onResendResults));
 $('again').addEventListener('click', guard(() => againRun?.()));
 
 // Sound and settings
@@ -1589,7 +1950,7 @@ $('reset').addEventListener('click', () => {
   if (!confirm('Forget your name, seat, and game in this window?')) return;
   stopListening(false);
   sessionStorage.removeItem(STORAGE_KEY);
-  state = initialState();
+  state = withPlayerId(initialState(), randomU16);
   joinScreen = false;
   resetRoundUi();
   setStatus('Reset. Enter your name to play.');
@@ -1627,7 +1988,19 @@ document.querySelectorAll<HTMLButtonElement>('.prepare').forEach((btn) =>
     }
   }),
 );
-registerServiceWorker();
+// A new version is downloaded: offer it, never apply it by itself (R: update between games).
+registerServiceWorker((apply) => {
+  applyUpdate = apply;
+  render();
+});
+$('update-btn').addEventListener('click', () => {
+  if (!applyUpdate) return;
+  const phase = phaseOf(state);
+  const a = updateAdvice({ inRound: IN_GAME.includes(phase) && phase !== 'ready', busyTurn: phase === 'my-turn', sending: sending() });
+  if (!a.enabled || (a.confirm && !confirm(a.confirm))) return;
+  stopListening(false);
+  applyUpdate();
+});
 void isOfflineReady().then((ready) => {
   if (ready) setOffline('ready', READY_TEXT);
   else if (!navigator.onLine) setOffline('failed', 'You are offline and this device was not prepared. Connect once and tap Prepare.');

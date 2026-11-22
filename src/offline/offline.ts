@@ -6,12 +6,50 @@ export type PrepareResult =
 
 const READY_KEY = 'ghostfreq:offline-ready';
 
-/** Registers the service worker on the published site only (dev uses an untrusted certificate). */
-export function registerServiceWorker(): void {
+/**
+ * Registers the service worker on the published site only (dev uses an
+ * untrusted certificate). `onUpdateReady` is called when a new version has
+ * downloaded and is waiting; its argument activates it and reloads the page.
+ * Nothing reloads unless that function is called (by the player's tap).
+ */
+export function registerServiceWorker(onUpdateReady?: (apply: () => void) => void): void {
   if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.register('./sw.js').catch(() => {
-    /* reported when the player taps Prepare */
-  });
+  navigator.serviceWorker
+    .register('./sw.js')
+    .then((reg) => {
+      const notify = () => {
+        const waiting = reg.waiting;
+        // Without a controller this is the first install: nothing to update.
+        if (waiting && navigator.serviceWorker.controller) onUpdateReady?.(() => applyUpdate(waiting));
+      };
+      notify();
+      reg.addEventListener('updatefound', () => {
+        const w = reg.installing;
+        w?.addEventListener('statechange', () => w.state === 'installed' && notify());
+      });
+      // A game night lasts hours: look for a new version when the page comes back, if online.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && navigator.onLine) reg.update().catch(() => undefined);
+      });
+    })
+    .catch(() => {
+      /* reported when the player taps Prepare */
+    });
+}
+
+let reloading = false;
+function reloadOnce() {
+  if (reloading) return;
+  reloading = true;
+  location.reload();
+}
+
+/** Activate the waiting version, then reload into it. */
+function applyUpdate(waiting: ServiceWorker): void {
+  navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+  waiting.postMessage({ type: 'skip-waiting' });
+  // If the switch is slow, reload anyway: the page then loads from the new worker.
+  setTimeout(reloadOnce, 4000);
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {

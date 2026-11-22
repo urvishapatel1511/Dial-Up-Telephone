@@ -40,11 +40,12 @@ const dot = () => {
   return g;
 };
 
-function room(n: number, extras: { name: string; seat: number }[] = []) {
+/** Device i gets player ID 0x100 + i, like each browser tab gets its own random ID. */
+function room(n: number, extras: { name: string; seat: number }[] = [], names: string[] = NAMES) {
   const d: State[] = [
-    openLobby(setProfile(initialState(), { name: 'Asha', mode: 'host', seat: 1 }), 0x0ab0),
-    ...NAMES.slice(1, n).map((name, i) => setProfile(initialState(), { name, mode: 'player', seat: i + 2 })),
-    ...extras.map((x) => setProfile(initialState(), { name: x.name, mode: 'player', seat: x.seat })),
+    openLobby(setProfile(initialState(0x100), { name: names[0], mode: 'host', seat: 1 }), 0x0ab0),
+    ...names.slice(1, n).map((name, i) => setProfile(initialState(0x101 + i), { name, mode: 'player', seat: i + 2 })),
+    ...extras.map((x, i) => setProfile(initialState(0x100 + n + i), { name: x.name, mode: 'player', seat: x.seat })),
   ];
   const events: Record<number, string[]> = {};
   const play = (from: number, out: Outgoing | null, deaf: number[] = []) => {
@@ -134,10 +135,12 @@ describe('ready check (R9)', () => {
     expect(res.state).toBe(r.d[1]);
   });
 
-  it('only a ready player can say hello, and saying hello is not the same as being confirmed', () => {
-    expect(helloPacket(setProfile(initialState(), { name: 'Bo' }))).toBeNull();
-    expect(helloPacket(setProfile(initialState(), { name: 'Bo', mode: 'host', seat: 1 }))).toBeNull();
-    const out = helloPacket(setProfile(initialState(), { name: 'Bo', mode: 'player', seat: 2 }))!;
+  it('only a ready player with a player ID can say hello, and saying hello is not the same as being confirmed', () => {
+    expect(helloPacket(setProfile(initialState(7), { name: 'Bo' }))).toBeNull();
+    expect(helloPacket(setProfile(initialState(7), { name: 'Bo', mode: 'host', seat: 1 }))).toBeNull();
+    expect(helloPacket(setProfile(initialState(), { name: 'Bo', mode: 'player', seat: 2 }))).toBeNull(); // no ID yet
+    const out = helloPacket(setProfile(initialState(7), { name: 'Bo', mode: 'player', seat: 2 }))!;
+    expect(hear(out.bytes)).toMatchObject({ type: 'hello', seat: 2, name: 'Bo', pid: 7 });
     expect(readyStatus(out.state)).toMatchObject({ helloSent: true, confirmed: false });
     expect(out.state.lastSent).toBeNull(); // an automatic message doesn't replace "Resend my last chirp"
   });
@@ -146,6 +149,80 @@ describe('ready check (R9)', () => {
     const r = room(3, [{ name: 'Zed', seat: 6 }]);
     r.play(0, callPacket(r.d[0], 3));
     expect(readyStatus(r.d[3]).seatTooHigh).toBe(3);
+  });
+});
+
+describe('players are tracked by player ID, never by name', () => {
+  it('REGRESSION: two players with the same name on different seats both stay in the roster, get confirmed, and score separately', () => {
+    // Asha hosts; two different phones are both called "Bo", on seats 2 and 3.
+    const r = room(3, [], ['Asha', 'Bo', 'Bo']);
+    r.play(1, helloPacket(r.d[1]));
+    r.play(2, helloPacket(r.d[2])); // before the fix, this removed the first Bo from seat 2
+    const ro = roster(r.d[0], 3);
+    expect(ro.seats.map((x) => [x.seat, x.status, x.names.join('+')])).toEqual([
+      [1, 'host', 'Asha'],
+      [2, 'ready', 'Bo'],
+      [3, 'ready', 'Bo'],
+    ]);
+    expect(ro).toMatchObject({ canStart: true, missing: [], duplicate: [], sameName: ['Bo'] });
+    // Neither Bo sees the other as a seat clash: they are on different seats.
+    expect(readyStatus(r.d[1]).clash).toEqual([]);
+    expect(readyStatus(r.d[2]).clash).toEqual([]);
+    // The ready check confirms both seats, and both phones see themselves confirmed.
+    const call = hear(r.play(0, callPacket(r.d[0], 3)).bytes) as Extract<Packet, { type: 'call' }>;
+    expect(call.confirmed).toBe(seatsToMask([1, 2, 3]));
+    expect([readyStatus(r.d[1]).confirmed, readyStatus(r.d[2]).confirmed]).toEqual([true, true]);
+    // Hearing either hello again (an echo or a retry) changes nothing.
+    const again = receive(r.d[0], hear(helloPacket(r.d[1])!.bytes), 2);
+    expect(again.state).toBe(r.d[0]);
+
+    // A full round: both seats play, confirm results, and keep separate scores.
+    r.play(0, startGame(r.d[0], { players: 3, gameId: 0x3b0, now: 0 }));
+    r.play(0, sendEntry(setWordDraft(r.d[0], { custom: 'cat' }), { drawing: dot() }));
+    r.play(1, sendEntry(r.d[1], { text: 'cat' }));
+    expect(r.d[2].game!.conflict).toBeNull(); // same name, different seat: not a conflict
+    r.play(2, sendEntry(r.d[2], { drawing: dot() }));
+    r.play(0, revealGame(r.d[0], 5));
+    r.play(0, sendResults(r.d[0], { funniest: 2, recognizable: 3, recovery: 0, final: 2 }));
+    r.play(1, ackPacket(r.d[1]));
+    r.play(2, ackPacket(r.d[2]));
+    expect(awaitingAcks(r.d[0].game!)).toEqual([]);
+    expect(r.d[0].game!.acks).toEqual([2, 3]);
+    const pts = scores(r.d[0].game!).map((s) => [s.seat, s.name, s.points]);
+    // seat 2: guessed the drawing + Funniest · seat 1: its drawing was guessed · seat 3: Most Recognizable
+    expect(pts).toEqual([
+      [2, 'Bo', 2],
+      [1, 'Asha', 1],
+      [3, 'Bo', 1],
+    ]);
+  });
+
+  it('two phones on the same seat with the same name are a duplicate, not one player', () => {
+    const r = room(3, [{ name: 'Cy', seat: 3 }]);
+    r.play(2, helloPacket(r.d[2]));
+    r.play(3, helloPacket(r.d[3]));
+    expect(roster(r.d[0], 3)).toMatchObject({ duplicate: [3], canStart: false });
+    expect(roster(r.d[0], 3).seats[2].names).toEqual(['Cy', 'Cy']);
+    expect(readyStatus(r.d[2]).clash).toEqual(['Cy']);
+    expect(readyStatus(r.d[3]).clash).toEqual(['Cy']);
+  });
+
+  it('a player who changes seat moves by player ID; another player with the same name stays put', () => {
+    const r = room(4, [], ['Asha', 'Bo', 'Cy', 'Bo']);
+    r.play(1, helloPacket(r.d[1]));
+    r.play(3, helloPacket(r.d[3]));
+    r.d[3] = setProfile(r.d[3], { seat: 3 }); // the second Bo moves from seat 4 to seat 3
+    r.play(3, helloPacket(r.d[3]));
+    expect(roster(r.d[0], 4).seats.map((x) => [x.seat, x.status, x.names.join('+')])).toEqual([
+      [1, 'host', 'Asha'],
+      [2, 'ready', 'Bo'],
+      [3, 'ready', 'Bo'],
+      [4, 'missing', ''],
+    ]);
+    // a player who renames themselves keeps their seat (same ID)
+    r.d[1] = setProfile(r.d[1], { name: 'Bob' });
+    r.play(1, helloPacket(r.d[1]));
+    expect(roster(r.d[0], 4).seats[1].names).toEqual(['Bob']);
   });
 });
 
@@ -212,9 +289,9 @@ describe('results confirmation (R11)', () => {
     r.play(1, ack);
     const twice = receive(r.d[0], hear(ack.bytes), 3);
     expect(twice.state.game!.acks).toEqual([2]);
-    const other = receive(r.d[0], { type: 'ack', gameId: 0x1234, seat: 3 }, 3);
+    const other = receive(r.d[0], { type: 'ack', gameId: 0x1234, seat: 3, step: 0 }, 3);
     expect(other.state).toBe(r.d[0]);
-    const host = receive(r.d[0], { type: 'ack', gameId: 0x99, seat: 1 }, 3);
+    const host = receive(r.d[0], { type: 'ack', gameId: 0x99, seat: 1, step: 0 }, 3);
     expect(host.state).toBe(r.d[0]);
   });
 });
@@ -235,8 +312,10 @@ describe('missed start signal (R9.7)', () => {
     const joined = receive(r.d[2], start, 4);
     expect(joined.event.type).toBe('joined');
     expect(joined.state.game?.gameId).toBe(0x55);
-    // others already in the round ignore the repeated start
-    expect(receive(r.d[1], start, 4).event.type).toBe('duplicate');
+    // others already in the round keep their state; Bo hasn't played yet, so it confirms again
+    const bo = receive(r.d[1], start, 4);
+    expect(bo.state).toBe(r.d[1]);
+    expect(bo.event).toEqual({ type: 'start-again', ackIn: ackDelay(2) });
   });
 
   it('the start signal alone never marks anyone as joined on the host', () => {

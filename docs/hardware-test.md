@@ -1,6 +1,6 @@
-# Real-device test: Quick Round and Party Match (v3)
+# Real-device test: Quick Round and Party Match (v4)
 
-Nobody has run this test yet. Record what you see in `docs/hardware-log.md`. The automated ggwave test is *synthetic* (no speaker, no microphone), so only this checklist tests the real air path.
+Nobody has run this test yet. Every phone must show the same version in the page footer ("sound protocol v4"). A phone on an older version can't talk to the others and is reported as such. Record what you see in `docs/hardware-log.md`. The automated ggwave test is *synthetic* (no speaker, no microphone), so only this checklist tests the real air path.
 
 You need **3 or more devices** (laptop + 2 phones is fine). With 3 devices you also test the odd-player room guess. With 4 you test the even case.
 
@@ -22,13 +22,13 @@ Volume high everywhere. iPhone: silent mode off. Devices within about 1 m, in a 
 | 1 | Host | Name → **Host a game**. Allow the mic | Roster: seat 1 (you), seats 2..4 "not ready yet". Start says "Waiting for seat 2" |
 | 2 | Players, one at a time | Name → **Join a game** → seats 2, 3, … → **I'm ready**. Allow the mic | Player: "✓ Microphone works", "✓ Ready message played", "… Not confirmed yet". Host: the name appears on that seat |
 | 2b | Host | Set the player count. Tap **📣 Check who's ready** | Unconfirmed players answer one at a time (about 2.4 s apart). Every player shows "✓ Confirmed by Asha" |
-| 2c | Host | **Start Quick Round** (Crackly is the default; check Customize) | The dial-up handshake, then the start chirp. Host: "Played the start signal. Each phone joins when it hears it." Every player: "Connected! … You are seat N." |
-| 3 | Host (first drawer) | See the suggested word. Try 🎲 Another word, or type one. Draw (see section G), Undo/Redo. **Send my drawing** | No handshake this time, only the data chirp. Host: "Played your drawing. It's confirmed when Bo's turn is heard." Seat 2: "Your turn!" |
+| 2c | Host | **Start Quick Round** (Crackly is the default; check Customize) | The dial-up handshake, then the start chirp. Every player: "Connected! … You are seat N." Then each player's phone plays a short confirmation, one at a time. Host: "⏳ Waiting for confirmation … Confirmed: Bo, Cy", then "✓ Every phone confirmed the start signal." |
+| 3 | Host (first drawer) | See the suggested word. Try 🎲 Another word, or type one. Draw (see section G), Undo/Redo. **Send my drawing** | No handshake this time, only the data chirp. Host: "⏳ Waiting for confirmation: … Waiting for Bo's phone to confirm it arrived". About 1 s later Bo's phone plays a short "got it" chirp and the host shows "✓ Confirmed". Seat 2: "Your turn!" |
 | 4 | Seat 2 | Guess, send | Host's line shows "✓ received" for hop 1. Seat 3 sees only the guess. If static changed it: "Draw whatever this makes you imagine—even if it's nonsense." |
 | 5 | Everyone | Continue to the last seat | Host: "Gather around for the reveal!" (odd count: the room guess box first) |
 | 6 | Host (odd count) | Show the last drawing to the room. Everyone guesses out loud. **Show me the answer** → ✓ or ✗ | The choice is pre-filled in the awards form |
 | 7 | Host | **Reveal the chain** → ▶ Play the show, then ⏸, ◀ Previous, Next ▶, Show all | Every phone shows the same chain, the same Sent/Arrived pairs, and the same captions |
-| 8 | Host | Vote out loud, pick awards or none, **Send results** | Host: "Results sent. Waiting for …", then each seat turns "✓" as its phone confirms (one at a time). Every phone shows the same scores |
+| 8 | Host | Vote out loud, pick awards or none, **Send results** | Host: "Results played. Waiting for confirmation from …", then each seat turns "✓" as its phone confirms (one at a time). Every phone shows the same scores. Equal points show the same rank number and the same highlight |
 | 8b | Host | **Send results again** | Nothing changes on any phone; phones confirm again; scores stay the same |
 | 9 | Players, then host | **Ready for the next round**, then **Host another round** | A new round, no new ready check needed. An old chirp replayed is ignored |
 
@@ -55,6 +55,26 @@ Volume high everywhere. iPhone: silent mode off. Devices within about 1 m, in a 
 - **Seat too high:** a player picks seat 6 in a 4-player game. They're told to pick a lower seat. After fixing it, the host's **↻ Resend the start signal** lets them join.
 - **Effects off** (⚙ Settings): no handshake at all, and chirps still play.
 - **Secrecy:** while waiting, no phone shows the secret word or anyone else's entry.
+
+## H. Delivery, names, ties, and updates (v4)
+
+Run these with at least 3 phones. Write each result in `docs/hardware-log.md`: count chirps, don't estimate.
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | **First-attempt delivery, quiet room.** Play a full round without covering any mic | For every hop, how many plays before "✓ Confirmed"? Ideal: 1. Note any hop that needed an automatic retry |
+| 2 | **Automatic retry.** Cover the next player's mic while a drawing plays, uncover it right after | About 4–5 s later the sender plays the same chirp again by itself ("retry 1 of 2"), the next player's phone answers "got it", and the sender shows "✓ Confirmed". The next player's turn starts once, not twice |
+| 3 | **Retries are bounded.** Keep the next player's mic covered | The sender plays at most 3 times in total, then shows "⚠ No confirmation yet" with **Play my turn again**. Nothing else plays by itself afterwards. One tap = exactly one more play |
+| 4 | **Lost "got it".** Cover the *sender's* mic for ~3 s right after its chirp ends | The sender retries; the other phones show "Heard the same chirp again. Nothing changed"; the receiver says "got it" again; nobody's turn repeats; the scores later match on every phone |
+| 5 | **Lost start confirmation.** Cover the host's mic during the players' start confirmations | The host resends the start once by itself. Players who haven't played yet confirm again; nobody's round restarts |
+| 6 | **Lost results confirmation.** Cover the host's mic while the players confirm the results | The host resends the results once by itself; every phone confirms again; scores don't change |
+| 7 | **Background noise.** Repeat 1 with music or people talking at normal volume | Count plays per hop and failed "got it"s. Note when retries ran out |
+| 8 | **No overlaps.** Watch for two phones chirping at once during start/results confirmations and "got it" | Should never happen. If a player taps Send while others are confirming, their phone says "Waiting a moment: other phones are answering" and plays after |
+| 9 | **Same names.** Two players both use the name "Bo" on seats 2 and 3 | Both appear in the roster ("More than one player is called Bo. Seat numbers tell them apart."). Both get confirmed, play, confirm results, and keep separate scores |
+| 10 | **Same name, same seat.** Two phones named "Cy" both pick seat 3 | The roster shows "2 phones (Cy and Cy) picked it" and Start is blocked |
+| 11 | **Ties.** Finish a round where two players have the same points | Both show rank 1, the same gold badge, and "Joint winners: …" |
+| 12 | **Repeated rounds.** Play 3 Quick Rounds and one Party Match back to back without reloading | No stale chirp from an earlier round is accepted; confirmations keep working every round |
+| 13 | **Update prompt.** Deploy a new build, then bring a phone that has the old one back online (switch tabs away and back) | "Update available" appears with **Reload to update**. It never reloads by itself. During a round, the button asks first. After reloading, the footer shows the new version |
 
 ## E. Measure
 

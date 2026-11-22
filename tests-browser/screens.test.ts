@@ -99,11 +99,12 @@ function scenario() {
 
   // Ready check (host setup and a player's ready screen)
   const host = openLobby(setProfile(initialState(), { name: 'Asha', mode: 'host', seat: 1 }), 0x0ab0);
-  const heard = (s: State, hellos: [number, string][]) => hellos.reduce((acc, [seat, name]) => receive(acc, { type: 'hello', gameId: 0, seat, name }, 0).state, s);
+  const heard = (s: State, hellos: [number, string][]) =>
+    hellos.reduce((acc, [seat, name], i) => receive(acc, { type: 'hello', gameId: 0, seat, name, pid: 0x300 + i }, 0).state, s);
   snaps.hostWaiting = heard(host, [[2, 'Bo'], [4, 'Dee']]);
   snaps.hostDuplicate = heard(host, [[2, 'Bo'], [3, 'Cy'], [3, 'Zed'], [4, 'Dee']]);
   snaps.hostAllReady = heard(host, [[2, 'Bo'], [3, 'Cy'], [4, 'Dee']]);
-  const bo = helloPacket(setProfile(initialState(), { name: 'Bo', mode: 'player', seat: 2 }))!.state;
+  const bo = helloPacket(setProfile(initialState(0x402), { name: 'Bo', mode: 'player', seat: 2 }))!.state;
   snaps.playerSent = bo;
   snaps.playerConfirmed = receive(bo, { type: 'call', gameId: 0x0ab0, players: 4, name: 'Asha', confirmed: 0b11, duplicate: 0 }, 0).state;
 
@@ -132,6 +133,17 @@ function scenario() {
     if (round < 3) c.play(0, nextRound(c.d[0], 99 + round, round * 100_000));
   }
   snaps.matchFinalSeat2 = c.d[1];
+
+  // E: a 4-player Quick Round on a clear line where every guess matched: a four-way tie
+  const t = makeRoom(4);
+  t.start({ gameId: 0x7e, noise: 0 });
+  t.turn(1, { drawing: PUMPKIN });
+  t.turn(2, { text: 'pumpkin' });
+  t.turn(3, { drawing: PUMPKIN });
+  t.turn(4, { text: 'pumpkin' });
+  t.play(0, revealGame(t.d[0], 50_000));
+  t.results({});
+  snaps.tiedResults = t.d[1];
 
   // D: the developer's screen: a 2-player Party Match, round 2, the host waiting for seat 2
   const m = makeRoom(2);
@@ -495,8 +507,10 @@ describe('Dial-Up Telephone in a real browser (no sound between devices)', () =>
     await wait.close();
     const sent = await open(PHONE, s.seat2Sent);
     expect(await sent.textContent('#secondary')).toContain('Play my turn again');
-    expect(await sent.textContent('#line')).toContain('♪ played');
-    expect(await sent.textContent('#t-text')).toContain("It's confirmed when");
+    expect(await sent.textContent('#line')).toContain('♪ played, not confirmed yet');
+    expect(await sent.textContent('#t-title')).toBe('Played! Keep it secret');
+    // Bo's phone doesn't know seat 3's name yet, and never claims it arrived just because it played.
+    expect(await sent.textContent('#t-text')).toContain('Waiting for the phone at seat 3 to confirm it arrived');
     await shot(sent, '09-seat2-sent-phone');
     await sent.close();
   });
@@ -558,14 +572,14 @@ describe('Dial-Up Telephone in a real browser (no sound between devices)', () =>
 
   it('results: "sent" vs confirmed on the host; received and confirmed on players', async () => {
     const pending = await open(LAPTOP, s.hostResultsPending);
-    expect(await pending.textContent('#acks')).toContain('Results sent. Waiting for Bo, Cy, Dee');
+    expect(await pending.textContent('#acks')).toContain('Results played. Waiting for confirmation from Bo, Cy, Dee');
     expect(await pending.isVisible('#resend-results')).toBe(true);
     expect(await pending.textContent('#flow li.now')).toBe('Results');
     expect(await pending.textContent('#again-note')).toContain('Waiting for confirmations');
     await shot(pending, '13-host-results-pending-laptop');
     await pending.close();
     const done = await open(LAPTOP, s.hostResultsDone);
-    expect(await done.textContent('#acks')).toBe('✓ Results sent and confirmed by every phone.');
+    expect(await done.textContent('#acks')).toBe('✓ Results played and confirmed by every phone.');
     expect(await done.textContent('#flow li.now')).toBe('Next round');
     expect(await done.isDisabled('#again')).toBe(false);
     await done.close();
@@ -575,7 +589,7 @@ describe('Dial-Up Telephone in a real browser (no sound between devices)', () =>
     expect(await player.$$eval('#chain li.awarded', (l) => l.length)).toBe(3);
     await player.close();
     const acked = await open(PHONE, s.seat2Acked);
-    expect(await acked.textContent('#acks')).toBe('✓ Results received. Your phone confirmed them to the host.');
+    expect(await acked.textContent('#acks')).toBe('✓ Results received. Your phone played its confirmation to the host.');
     expect(await acked.textContent('#flow li.now')).toBe('Next round');
     await shot(acked, '13b-results-confirmed-phone');
     await acked.close();
@@ -594,9 +608,35 @@ describe('Dial-Up Telephone in a real browser (no sound between devices)', () =>
     const page = await open(PHONE, s.matchFinalSeat2);
     expect(await page.textContent('#round-tag')).toContain('round 3 of 3');
     expect(await page.isVisible('#final-box')).toBe(true);
-    expect(await page.textContent('#final-text')).toMatch(/wins the Party Match|tie/);
+    expect(await page.textContent('#final-text')).toMatch(/wins the Party Match|Joint winners/);
     expect(await page.$$eval('#standings li', (l) => l.length)).toBe(3);
     await shot(page, '15-match-final-phone');
+    await page.close();
+  });
+
+  it('tied scores: equal ranks, equal highlight, and "Joint winners"', async () => {
+    const page = await open(PHONE, s.tiedResults);
+    const rows = await page.$$eval('#scores li', (l) => l.map((li) => [li.querySelector('.rank')?.textContent, li.classList.contains('top'), li.querySelector('.pts')?.textContent]));
+    // 4 players, every guess matched, no awards: everyone has 1 point
+    expect(rows).toEqual([
+      ['1', true, '1 pt'],
+      ['1', true, '1 pt'],
+      ['1', true, '1 pt'],
+      ['1', true, '1 pt'],
+    ]);
+    expect(await page.textContent('#scores-top')).toBe('🏆 Joint winners: Asha, Bo, Cy and Dee');
+    expect(await page.$$eval('#scores li .tag', (t) => t.map((x) => x.textContent))).toEqual(['Joint winner', 'Joint winner', 'Joint winner', 'Joint winner']);
+    // every rank-1 badge looks the same: list order doesn't break the tie
+    const looks = await page.$$eval('#scores li .rank', (b) => b.map((x) => getComputedStyle(x).backgroundImage));
+    expect(new Set(looks).size).toBe(1);
+    await shot(page, '17-tied-scores-phone');
+    await page.close();
+  });
+
+  it('the app version is shown; there is no update prompt without a waiting update', async () => {
+    const page = await open(PHONE);
+    expect(await page.textContent('#app-version')).toMatch(/^Dial-Up Telephone v\d+\.\d+\.\d+.* · sound protocol v4$/);
+    expect(await page.isVisible('#update')).toBe(false);
     await page.close();
   });
 

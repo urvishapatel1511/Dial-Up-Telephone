@@ -6,7 +6,14 @@ The classic **telephone** drawing game, played over a resurrected **1980s acoust
 
 > This repository started as "Ghost Frequency" (renamed from `Ghost_frequency`), a two-player ghost puzzle. It was replaced by this party game. The ghost version is still in git history (commit `62f79bf`).
 
-## What's new in v3 "Party Line"
+## What's new in 0.2.0 (sound protocol v4)
+
+- **Confirmed delivery:** a chirp that finished playing shows "Waiting for confirmation", never "received". The next player's phone answers each turn with a short "got it" chirp, and each phone confirms the start and the results in its own time slot. If no confirmation comes, the sender plays the same chirp again by itself (at most twice for a turn, once for a start or results), then offers a retry button. Copies never repeat a turn or score twice.
+- **Same names are fine:** each browser tab has its own player ID, so two players called "Bo" on different seats both stay in the roster and keep separate scores. Two phones on the same seat are always flagged, even with the same name.
+- **Ties:** equal points share a rank (5, 5, 3 → 1, 1, 3) and the same highlight, with "Joint winners".
+- **Updates:** the footer shows the app version. A new version shows "Update available · Reload to update" and never reloads by itself. Update between games: phones on different sound protocol versions can't talk, and say so.
+
+## v3 "Party Line"
 
 - **Two ways to play:** ⚡ *Quick Round* (one chain) or 🏆 *Party Match* (three rounds with running totals and a final celebration). The first drawer moves one seat each round, so everyone gets to draw and to guess.
 - **Prompt categories:** Mix of everything, Spooky, Everyday things, Animals & food, and Silly combos ("ghost taxi", "vampire DJ", "zombie chef"…). The first drawer picks the word privately, rerolls it, or types their own.
@@ -33,7 +40,7 @@ Missed a chirp? Tap **Ask for it by sound**. Duplicates change nothing, and rese
 
 ## Why sound?
 
-One chirp reaches every phone in the room at once. That broadcast is what lets every device build the same reveal with no network at all. Each chirp shows how many bytes it carried (at most 58 for the first drawing, which also carries the secret word; 46 for other drawings; 26 for a guess; 7–17 for control signals) and how long it lasted.
+One chirp reaches every phone in the room at once. That broadcast is what lets every device build the same reveal with no network at all. Each chirp shows how many bytes it carried (at most 58 for the first drawing, which also carries the secret word; 46 for other drawings; 26 for a guess; 7–17 for control signals) and how long it lasted. Confirmations ("got it", start, results) are 8 bytes.
 
 ## Develop
 
@@ -49,14 +56,15 @@ npm.cmd run dev:https # HTTPS on the LAN for phone microphone access
 
 ## How it works
 
-- `src/protocol/packet.ts`: v3 packets `start` / `entry` / `reveal` / `results` / `need` / `call` / `hello` / `ack`, at most 58 bytes, with a CRC-8. Older versions are rejected.
-- `src/game/schedule.ts`: time slots for automatic replies, so phones answering a ready check or confirming results never chirp at once.
+- `src/protocol/packet.ts`: v4 packets `start` / `entry` / `reveal` / `results` / `need` / `call` / `hello` (with a player ID) / `ack` (results, start, or "got hop k"), at most 58 bytes, with a CRC-8. Chirps from older or newer versions are reported, never misread.
+- `src/game/schedule.ts`: time slots for automatic replies, so phones answering a ready check or confirming never chirp at once, and how long each chirp keeps the line busy.
+- `src/game/delivery.ts`: playing → waiting → confirmed / no confirmation yet, with bounded retries by the sender only. `src/game/ranking.ts`: competition ranks for tied scores.
 - `src/game/telephone.ts`: pure game state for one player: joining, turns, secrecy, static, missing-hop tracking and recovery, reveal, scores, awards, Party Match totals, duplicate/stale handling.
 - `src/game/match.ts`: the rotation and the one-chance-per-player rule. `src/game/words.ts`: prompt categories. `src/game/noise.ts`: deterministic line static with curated twists. `src/game/captions.ts`: factual reveal captions.
 - `src/game/canvas.ts` + `src/ui/editor.ts`: the drawing model (the start square decides paint or erase, stroke-level undo/redo, brushes) and its accessible editor (pointer capture for mouse, touch, and pen).
 - `src/audio/handshake.ts`: the synthesized dial-up handshake (start of a round only), tested to never block decoding.
 - `src/state/sender.ts`: commits a move only after its chirp has actually played. A failed playback can be retried with identical bytes.
 - `src/audio`: ggwave (vendored, MIT) turns bytes into sound and back. Also a live spectrum and switchable effects that never overlap a chirp.
-- `src/offline`: the service worker and the "Prepare for offline play" check.
+- `src/offline`: the service worker, the "Prepare for offline play" check, and the update prompt (a new version waits until the player taps Reload to update).
 
 Spec, design, and tasks: `.kiro/specs/ghost-frequency/`. Third-party licenses: `THIRD_PARTY_NOTICES.md`.

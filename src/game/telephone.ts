@@ -1,5 +1,6 @@
 import type { Grid } from '../protocol/drawing';
 import {
+  ACK_RESULTS,
   cleanName,
   cleanText,
   DRAW_SIZE,
@@ -38,6 +39,11 @@ export interface Profile {
   mode: Mode | null;
   /** Fixed seat at the table: 1 for the host, 2..8 for players. */
   seat: number | null;
+  /**
+   * Random ID of this browser tab (1..65535, 0 = not set yet). It identifies
+   * the player in the ready check, so two players with the same name stay two players.
+   */
+  pid: number;
 }
 
 export interface Entry {
@@ -76,6 +82,10 @@ export interface Game {
   conflict: string | null;
   /** Host: seats that confirmed the results. Player: [own seat] once its confirmation played. */
   acks?: number[];
+  /** Host: seats that confirmed the start signal. */
+  joined?: number[];
+  /** Hops whose next player said "got it" (heard by this device). */
+  receipts?: number[];
   startedAt: number;
   revealedAt: number | null;
 }
@@ -100,12 +110,21 @@ export interface Stats {
   airtimeMs: number;
 }
 
+/** A phone heard in the ready check: its player ID and the name it showed. */
+export interface LobbyPlayer {
+  pid: number;
+  name: string;
+}
+
 /** The ready check before a round (R9). */
 export interface Lobby {
   owner: Mode;
   lobbyId: number;
-  /** Ready messages heard, seat → names. Host: the roster. Player: other phones (for seat clashes). */
-  seats: Record<string, string[]>;
+  /**
+   * Ready messages heard, seat → phones (by player ID, never by name).
+   * Host: the roster. Player: other phones (for seat clashes).
+   */
+  seats: Record<string, LobbyPlayer[]>;
   /** Player: the host's latest ready check. */
   call: { host: string; players: number; confirmed: number[]; duplicate: number[] } | null;
   /** Player: a ready message has played (that is not the same as confirmed). */
@@ -113,7 +132,7 @@ export interface Lobby {
 }
 
 export interface State {
-  v: 3;
+  v: 4;
   profile: Profile;
   game: Game | null;
   match: Match | null;
@@ -129,7 +148,10 @@ export interface State {
 export type Phase = 'lobby' | 'host-setup' | 'ready' | 'my-turn' | 'waiting' | 'sent' | 'missing' | 'ready-to-reveal' | 'reveal';
 
 export type ReceiveEvent =
-  | { type: 'joined'; host: string; players: number; seat: number; noise: NoiseLevel; mode: GameMode; round: number }
+  /** `ackIn` = when this phone confirms the start to the host. */
+  | { type: 'joined'; host: string; players: number; seat: number; noise: NoiseLevel; mode: GameMode; round: number; ackIn: number | null }
+  /** The start of my current round again. `ackIn` is set while the host may not know I joined. */
+  | { type: 'start-again'; ackIn: number | null }
   | { type: 'not-ready'; host: string }
   | { type: 'seat-too-high'; host: string; players: number }
   | { type: 'entry'; step: number; name: string; forMe: boolean; last: boolean; recovered: boolean }
@@ -140,7 +162,8 @@ export type ReceiveEvent =
   | { type: 'need'; step: number }
   | { type: 'call'; host: string; players: number; confirmed: boolean; duplicate: boolean; seatTooHigh: boolean; replyIn: number | null }
   | { type: 'hello'; seat: number; name: string; clash: boolean }
-  | { type: 'ack'; seat: number }
+  /** `step` as in the ack packet: 0 results, 1..8 a hop arrived, 9 the start. */
+  | { type: 'ack'; seat: number; step: number }
   /** A ready player heard a turn from a round it isn't in. */
   | { type: 'missed-start'; gameId: number }
   | { type: 'other-game' }
@@ -151,8 +174,16 @@ export type ReceiveEvent =
 
 const emptyStats = (): Stats => ({ chirpsSent: 0, chirpsHeard: 0, bytesSent: 0, airtimeMs: 0 });
 
-export function initialState(): State {
-  return { v: 3, profile: { name: '', mode: null, seat: null }, game: null, match: null, lobby: null, seen: [], sent: [], retired: [], lastSent: null, stats: emptyStats() };
+export function initialState(pid = 0): State {
+  return { v: 4, profile: { name: '', mode: null, seat: null, pid }, game: null, match: null, lobby: null, seen: [], sent: [], retired: [], lastSent: null, stats: emptyStats() };
+}
+
+/** Give this tab a player ID if it has none. `random16` returns any uint16; 0 is never used. */
+export function withPlayerId(s: State, random16: () => number): State {
+  if (s.profile.pid >= 1 && s.profile.pid <= 0xffff) return s;
+  let pid = random16() & 0xffff;
+  while (pid === 0) pid = random16() & 0xffff;
+  return { ...s, profile: { ...s.profile, pid } };
 }
 
 function pushLimited<T>(list: T[], item: T, limit: number): T[] {
@@ -183,7 +214,7 @@ export function knownMissed(g: Game): number[] {
  */
 export function knownNames(s: State): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [seat, names] of Object.entries(s.lobby?.seats ?? {})) if (names.length === 1) out[seat] = names[0];
+  for (const [seat, players] of Object.entries(s.lobby?.seats ?? {})) if (players.length === 1) out[seat] = players[0].name;
   for (const r of s.match?.rounds ?? []) Object.assign(out, r.names);
   return out;
 }
@@ -296,6 +327,8 @@ function newGameFrom(p: Extract<Packet, { type: 'start' }>, seat: number, now: n
     results: null,
     conflict: null,
     acks: [],
+    joined: [],
+    receipts: [],
     startedAt: now,
     revealedAt: null,
   };
@@ -318,14 +351,18 @@ export function openLobby(s: State, lobbyId: number): State {
   return s.lobby?.owner === 'host' ? s : { ...s, lobby: newLobby('host', lobbyId & 0xffff) };
 }
 
-/** Record that `name` is at `seat`, moving it off any other seat (a player who changed seat). */
-function placeName(lobby: Lobby, seat: number, name: string): Lobby {
-  const seats: Record<string, string[]> = {};
-  for (const [k, names] of Object.entries(lobby.seats)) {
-    const rest = names.filter((n) => n !== name);
+/**
+ * Record that phone `pid` is at `seat` as `name`, moving it off any other seat
+ * (a player who changed seat). Phones are matched by player ID only: another
+ * phone with the same name is a different player and is never replaced.
+ */
+function placePlayer(lobby: Lobby, seat: number, pid: number, name: string): Lobby {
+  const seats: Record<string, LobbyPlayer[]> = {};
+  for (const [k, list] of Object.entries(lobby.seats)) {
+    const rest = list.filter((x) => x.pid !== pid);
     if (rest.length) seats[k] = rest;
   }
-  seats[String(seat)] = [...(seats[String(seat)] ?? []), name];
+  seats[String(seat)] = [...(seats[String(seat)] ?? []), { pid, name }];
   return { ...lobby, seats };
 }
 
@@ -336,7 +373,10 @@ export interface RosterSeat {
 }
 
 /** Host: who is confirmed for an N-player game. Start needs every seat 2..N confirmed exactly once. */
-export function roster(s: State, players: number): { seats: RosterSeat[]; canStart: boolean; missing: number[]; duplicate: number[]; extra: number[] } {
+export function roster(
+  s: State,
+  players: number,
+): { seats: RosterSeat[]; canStart: boolean; missing: number[]; duplicate: number[]; extra: number[]; sameName: string[] } {
   const heard = s.lobby?.owner === 'host' ? s.lobby.seats : {};
   const top = Math.max(players, ...Object.keys(heard).map(Number).filter((k) => heard[String(k)]?.length));
   const seats: RosterSeat[] = [];
@@ -345,14 +385,21 @@ export function roster(s: State, players: number): { seats: RosterSeat[]; canSta
       seats.push({ seat: 1, names: [cleanName(s.profile.name) ?? 'You'], status: 'host' });
       continue;
     }
-    const names = heard[String(k)] ?? [];
+    const names = (heard[String(k)] ?? []).map((x) => x.name);
     const status: RosterSeat['status'] = names.length > 1 ? 'duplicate' : k > players ? 'extra' : names.length === 1 ? 'ready' : 'missing';
     if (k <= players || names.length) seats.push({ seat: k, names, status });
   }
   const pick = (st: RosterSeat['status']) => seats.filter((x) => x.status === st).map((x) => x.seat);
   const duplicate = pick('duplicate');
   const missing = pick('missing');
-  return { seats, missing, duplicate, extra: pick('extra'), canStart: missing.length === 0 && !duplicate.some((k) => k <= players) };
+  // Names shared by players on different seats: allowed (seats tell them apart), but worth a note.
+  const count = new Map<string, number>();
+  for (const x of seats) if (x.status === 'host' || x.status === 'ready') count.set(x.names[0].toLowerCase(), (count.get(x.names[0].toLowerCase()) ?? 0) + 1);
+  const sameName = seats
+    .filter((x) => (x.status === 'host' || x.status === 'ready') && (count.get(x.names[0].toLowerCase()) ?? 0) > 1)
+    .map((x) => x.names[0])
+    .filter((n, i, all) => all.findIndex((m) => m.toLowerCase() === n.toLowerCase()) === i);
+  return { seats, missing, duplicate, extra: pick('extra'), sameName, canStart: missing.length === 0 && !duplicate.some((k) => k <= players) };
 }
 
 /** Host: the ready-check chirp. Confirmed and duplicated seats stay quiet; everyone else answers in turn. */
@@ -369,10 +416,10 @@ export function callPacket(s: State, players: number): Outgoing | null {
 /** Player: "I'm ready" (only played after the microphone started). */
 export function helloPacket(s: State): Outgoing | null {
   const name = cleanName(s.profile.name);
-  const seat = s.profile.seat;
-  if (s.profile.mode !== 'player' || !name || !seat) return null;
+  const { seat, pid } = s.profile;
+  if (s.profile.mode !== 'player' || !name || !seat || !(pid >= 1 && pid <= 0xffff)) return null;
   const lobby = s.lobby?.owner === 'player' ? s.lobby : newLobby('player', 0);
-  const out = outgoingFor(s, { type: 'hello', gameId: lobby.lobbyId, seat, name }, { keepLast: true });
+  const out = outgoingFor(s, { type: 'hello', gameId: lobby.lobbyId, seat, name, pid }, { keepLast: true });
   return { ...out, state: { ...out.state, lobby: { ...lobby, helloSent: true } } };
 }
 
@@ -380,13 +427,13 @@ export function helloPacket(s: State): Outgoing | null {
 export function readyStatus(s: State): { helloSent: boolean; confirmed: boolean; duplicate: boolean; clash: string[]; seatTooHigh: number | null; host: string | null } {
   const lobby = s.lobby?.owner === 'player' ? s.lobby : null;
   const seat = s.profile.seat ?? 0;
-  const me = cleanName(s.profile.name);
   const call = lobby?.call ?? null;
   return {
     helloSent: !!lobby?.helloSent,
     confirmed: !!call?.confirmed.includes(seat),
     duplicate: !!call?.duplicate.includes(seat),
-    clash: (lobby?.seats[String(seat)] ?? []).filter((n) => n !== me),
+    // Other phones on my seat, even if they use my name.
+    clash: (lobby?.seats[String(seat)] ?? []).filter((x) => x.pid !== s.profile.pid).map((x) => x.name),
     seatTooHigh: call && seat > call.players ? call.players : null,
     host: call?.host ?? null,
   };
@@ -398,14 +445,15 @@ function receiveLobby(s: State, p: Extract<Packet, { type: 'call' } | { type: 'h
   const me = cleanName(s.profile.name);
   if (p.type === 'hello') {
     if (p.seat === 1) return same;
-    if (mode === 'player' && p.seat === seat && p.name === me) return { state: s, event: { type: 'own-echo' } };
+    if (p.pid === s.profile.pid) return { state: s, event: { type: 'own-echo' } };
     if (mode !== 'host' && mode !== 'player') return same;
     const base = s.lobby ?? newLobby(mode, p.gameId);
-    const already =
-      !!base.seats[String(p.seat)]?.includes(p.name) && Object.entries(base.seats).every(([k, names]) => k === String(p.seat) || !names.includes(p.name));
-    const lobby = already && s.lobby ? s.lobby : placeName(base, p.seat, p.name);
-    const names = lobby.seats[String(p.seat)] ?? [];
-    const clash = mode === 'host' ? names.length > 1 : p.seat === seat && p.name !== me;
+    const here = base.seats[String(p.seat)]?.find((x) => x.pid === p.pid);
+    const elsewhere = Object.entries(base.seats).some(([k, list]) => k !== String(p.seat) && list.some((x) => x.pid === p.pid));
+    const already = here?.name === p.name && !elsewhere;
+    const lobby = already && s.lobby ? s.lobby : placePlayer(base, p.seat, p.pid, p.name);
+    const others = lobby.seats[String(p.seat)] ?? [];
+    const clash = mode === 'host' ? others.length > 1 : p.seat === seat;
     const event: ReceiveEvent = { type: 'hello', seat: p.seat, name: p.name, clash };
     return { state: lobby === s.lobby ? s : { ...s, lobby }, event };
   }
@@ -425,21 +473,108 @@ function receiveLobby(s: State, p: Extract<Packet, { type: 'call' } | { type: 'h
   };
 }
 
+// ---- confirmations ------------------------------------------------------------
+
+/**
+ * The seat that confirms hop `step` arrived: the next player, or the host for
+ * the last hop (it needs it for the reveal). Null when the author is that seat.
+ */
+export function receiverSeat(g: Game, step: number): number | null {
+  const seat = step < g.players ? seatOfStep(g, step + 1) : 1;
+  return seat === seatOfStep(g, step) ? null : seat;
+}
+
+/**
+ * True once this device has evidence that hop `step` reached the next player:
+ * their "got it", any later hop, or the reveal. Playback alone is never evidence.
+ */
+export function hopDelivered(g: Game, step: number): boolean {
+  if (!entryAt(g, step)) return false;
+  if (receiverSeat(g, step) === null || g.revealed || (g.receipts ?? []).includes(step)) return true;
+  for (let k = step + 1; k <= g.players; k++) if (entryAt(g, k)) return true;
+  return false;
+}
+
+/** Host: seats 2..N with evidence that they are in this round (start confirmed, a hop, or a "got it"). */
+export function joinedSeats(g: Game): number[] {
+  const seats = new Set(g.joined ?? []);
+  for (let k = 1; k <= g.players; k++) if (entryAt(g, k)) seats.add(seatOfStep(g, k));
+  for (const k of g.receipts ?? []) {
+    const r = receiverSeat(g, k);
+    if (r) seats.add(r);
+  }
+  seats.delete(1);
+  return [...seats].filter((x) => x >= 2 && x <= g.players).sort((a, b) => a - b);
+}
+
+/** Host: seats that haven't confirmed the start yet. */
+export function awaitingJoin(g: Game): number[] {
+  const joined = joinedSeats(g);
+  return Array.from({ length: g.players - 1 }, (_, i) => i + 2).filter((k) => !joined.includes(k));
+}
+
+const addTo = (list: number[] | undefined, v: number) => ((list ?? []).includes(v) ? null : [...(list ?? []), v].sort((a, b) => a - b));
+
+function receiveAck(s: State, p: Extract<Packet, { type: 'ack' }>): { state: State; event: ReceiveEvent } {
+  const g = s.game;
+  const ignored = { state: s, event: { type: 'ignored' } as ReceiveEvent };
+  if (!g || g.gameId !== p.gameId || p.seat < 1 || p.seat > g.players) return ignored;
+  const event: ReceiveEvent = { type: 'ack', seat: p.seat, step: p.step };
+  let game: Game | null = null;
+  if (p.step === ACK_RESULTS) {
+    // Players confirm results and the start to the host; the host never confirms its own.
+    if (g.seat !== 1 || !g.results || p.seat === 1) return ignored;
+    const acks = addTo(g.acks, p.seat);
+    if (acks) game = { ...g, acks };
+  } else if (p.step === NEED_START) {
+    if (g.seat !== 1 || p.seat === 1) return ignored;
+    const joined = addTo(g.joined, p.seat);
+    if (joined) game = { ...g, joined };
+  } else {
+    // "Got hop k": only from the seat that receives hop k.
+    if (p.step > g.players || receiverSeat(g, p.step) !== p.seat) return ignored;
+    const receipts = addTo(g.receipts, p.step);
+    if (receipts) game = { ...g, receipts };
+  }
+  return { state: game ? { ...s, game } : s, event };
+}
+
+/**
+ * The next player's "got it" for hop `step`, or null if this device is not
+ * that player or doesn't hold the hop. Sent again for every copy heard, so a
+ * lost "got it" is repaired by the author's retry.
+ */
+export function receiptPacket(s: State, step: number): Outgoing | null {
+  const g = s.game;
+  if (!g || g.revealed || step < 1 || step > g.players || !entryAt(g, step) || receiverSeat(g, step) !== g.seat) return null;
+  return outgoingFor(s, { type: 'ack', gameId: g.gameId, seat: g.seat, step }, { keepLast: true });
+}
+
+/** Player: confirm the start signal to the host. */
+export function startAckPacket(s: State): Outgoing | null {
+  const g = s.game;
+  if (!g || g.seat === 1 || g.revealed) return null;
+  return outgoingFor(s, { type: 'ack', gameId: g.gameId, seat: g.seat, step: NEED_START }, { keepLast: true });
+}
+
 /** Pure: apply a decoded packet. Anything not accepted returns the same state object. */
 export function receive(s: State, p: Packet, now: number): { state: State; event: ReceiveEvent } {
   // Ready-check chirps are idempotent and are never remembered as seen.
   if (p.type === 'call' || p.type === 'hello') return receiveLobby(s, p);
   const g = s.game;
-  if (p.type === 'ack') {
-    if (!g || g.seat !== 1 || g.gameId !== p.gameId || !g.results || p.seat < 2 || p.seat > g.players) return { state: s, event: { type: 'ignored' } };
-    const acks = g.acks ?? [];
-    if (acks.includes(p.seat)) return { state: s, event: { type: 'ack', seat: p.seat } };
-    return { state: { ...s, game: { ...g, acks: [...acks, p.seat].sort((a, b) => a - b) } }, event: { type: 'ack', seat: p.seat } };
-  }
+  // Confirmations are idempotent sets of seats or hops, so they are never remembered as seen.
+  if (p.type === 'ack') return receiveAck(s, p);
 
   const key = packetKey(p);
   if (s.sent.includes(key)) return { state: s, event: { type: 'own-echo' } };
   if (s.retired.includes(p.gameId)) return { state: s, event: { type: 'stale' } };
+
+  // The start of my current round again (a retry, or an answer to a late player).
+  // Confirm again only while I haven't played my hop: after that, my hop itself tells the host I'm in.
+  if (p.type === 'start' && g && g.gameId === p.gameId && !g.revealed) {
+    const again = g.seat !== 1 && !entryAt(g, myStep(g));
+    return { state: s, event: { type: 'start-again', ackIn: again ? ackDelay(g.seat) : null } };
+  }
 
   // Requests are never remembered as "seen": the same hop can be asked for again.
   if (p.type === 'need') {
@@ -476,7 +611,7 @@ export function receive(s: State, p: Packet, now: number): { state: State; event
     const retired = g ? pushLimited(s.retired, g.gameId, RETIRED_LIMIT) : s.retired;
     return accept(
       { ...s, retired, match, game: newGameFrom(p, seat, now), lastSent: null },
-      { type: 'joined', host: p.name, players: p.players, seat, noise: p.noise, mode: p.mode, round: p.round },
+      { type: 'joined', host: p.name, players: p.players, seat, noise: p.noise, mode: p.mode, round: p.round, ackIn: ackDelay(seat) },
     );
   }
 
@@ -486,12 +621,13 @@ export function receive(s: State, p: Packet, now: number): { state: State; event
     // Fill gaps, before or after the reveal; never overwrite an accepted entry.
     if (p.step > g.players || entryAt(g, p.step)) return { state: s, event: { type: 'ignored' } };
     const entry: Entry = 'drawing' in p ? { step: p.step, name: p.name, drawing: p.drawing } : { step: p.step, name: p.name, text: p.text };
+    // My own chirps were filtered above (s.sent), so an entry for my step came from another
+    // phone on my seat, whatever name it uses.
     const mine = p.step === myStep(g);
-    const myName = cleanName(s.profile.name) ?? '';
-    const conflict = mine && p.name !== myName ? p.name : g.conflict;
+    const conflict = mine ? p.name : g.conflict;
     const word = p.step === 1 && 'drawing' in p && p.word ? p.word : g.word;
     const game: Game = { ...g, word, conflict, entries: { ...g.entries, [String(p.step)]: entry } };
-    if (mine && p.name !== myName) return accept({ ...s, game }, { type: 'conflict', name: p.name });
+    if (mine) return accept({ ...s, game }, { type: 'conflict', name: p.name });
     return accept(
       { ...s, game },
       { type: 'entry', step: p.step, name: p.name, forMe: p.step === myStep(g) - 1, last: p.step === g.players, recovered: g.revealed },
@@ -696,7 +832,7 @@ export function askToJoin(s: State, gameId: number): Outgoing | null {
 export function ackPacket(s: State): Outgoing | null {
   const g = s.game;
   if (!g || g.seat === 1 || !g.results) return null;
-  const out = outgoingFor(s, { type: 'ack', gameId: g.gameId, seat: g.seat }, { keepLast: true });
+  const out = outgoingFor(s, { type: 'ack', gameId: g.gameId, seat: g.seat, step: ACK_RESULTS }, { keepLast: true });
   return { ...out, state: { ...out.state, game: { ...g, acks: [g.seat] } } };
 }
 
@@ -898,23 +1034,37 @@ export function matchOver(s: State): boolean {
 
 // ---- persistence (per tab) -------------------------------------------------
 
-export const STORAGE_KEY = 'dialup:v3';
+export const STORAGE_KEY = 'dialup:v4';
+/** The previous version's key. Only the name, role, and seat carry over: its rounds used v3 chirps. */
+export const OLD_STORAGE_KEY = 'dialup:v3';
 
 export interface KeyValueStore {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
 }
 
-export function loadState(store: KeyValueStore): State {
+function parse(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
   try {
-    const raw = store.getItem(STORAGE_KEY);
-    if (!raw) return initialState();
-    const p = JSON.parse(raw) as Partial<State>;
-    if (p.v !== 3 || !p.profile || !Array.isArray(p.seen) || !Array.isArray(p.sent)) return initialState();
-    return { ...initialState(), ...p } as State;
+    const p = JSON.parse(raw) as unknown;
+    return p && typeof p === 'object' ? (p as Record<string, unknown>) : null;
   } catch {
-    return initialState();
+    return null;
   }
+}
+
+export function loadState(store: KeyValueStore): State {
+  const p = parse(store.getItem(STORAGE_KEY)) as Partial<State> | null;
+  if (p) {
+    if (p.v !== 4 || !p.profile || !Array.isArray(p.seen) || !Array.isArray(p.sent)) return initialState();
+    return { ...initialState(), ...p, profile: { ...initialState().profile, ...p.profile } } as State;
+  }
+  const old = parse(store.getItem(OLD_STORAGE_KEY));
+  const prof = old?.v === 3 && old.profile && typeof old.profile === 'object' ? (old.profile as Partial<Profile>) : null;
+  if (!prof) return initialState();
+  const mode = prof.mode === 'host' || prof.mode === 'player' ? prof.mode : null;
+  const seat = typeof prof.seat === 'number' && prof.seat >= 1 && prof.seat <= PLAYERS_MAX ? prof.seat : null;
+  return setProfile(initialState(), { name: typeof prof.name === 'string' ? prof.name : '', mode, seat });
 }
 
 export function saveState(store: KeyValueStore, s: State): void {
