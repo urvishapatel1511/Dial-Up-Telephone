@@ -2,7 +2,7 @@ import { crc8 } from './crc8';
 import { packGrid, unpackGrid, type Grid } from './drawing';
 
 /**
- * Dial-Up Telephone packet v4 (see .kiro/specs/ghost-frequency/design.md), ≤ 58 bytes:
+ * Dial-Up Telephone packet v4 (see .kiro/specs/dial-up-telephone/design.md), ≤ 58 bytes:
  *  0     magic 0xD4
  *  1     bits0-3 type: 1 start · 2 entry · 3 reveal · 4 results · 5 need · 6 call · 7 hello · 8 ack
  *        bits4-5 static level (start only)

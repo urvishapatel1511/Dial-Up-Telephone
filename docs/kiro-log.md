@@ -5,8 +5,8 @@ A factual record for the hackathon write-up. It lists only what happened in this
 ## Tools and features used
 
 - **Kiro IDE** agent, in one long session.
-- **Spec-driven development:** `.kiro/specs/ghost-frequency/` (requirements, design, tasks). The spec was rewritten before code at every redesign.
-- **Steering:** `.kiro/steering/ghost-frequency.md`, loaded into every request:
+- **Spec-driven development:** `.kiro/specs/dial-up-telephone/` (requirements, design, tasks). The spec was rewritten before code at every redesign. The folder was called `ghost-frequency` until the v0.2.0 cleanup.
+- **Steering:** `.kiro/steering/dial-up-telephone.md` (formerly `ghost-frequency.md`), loaded into every request:
   - sound-only transfer;
   - pure, Node-testable logic;
   - a test for every change;
@@ -91,8 +91,35 @@ Bugs found during this work:
 - Browser check: the player's ready screen said "Microphone is off" right after the ready message played, because the microphone restarts after a chirp. The check now shows "Starting the microphone…" in that moment, and the test waits for the restart.
 - Unit test: a repeated `hello` produced a new state object (not idempotent). Fixed.
 
+## v0.2.0 reliability fixes (sound protocol v4)
+
+The developer listed five issues: duplicate names breaking the lobby, sound-transfer recovery, visible app updates, tied scoreboards, and keeping the drawing controls. The agent read the send, receive, timeout, resend, and acknowledgment code before changing it, and recorded the plan in the spec (`design.md` sections "Delivery confirmation", "Scoreboards", "App updates"; `tasks.md` Phase F).
+
+Causes found by reading the code:
+- **Duplicate names:** the host's roster moved a *name* off every other seat when a ready message arrived, so a second "Bo" on another seat removed the first one.
+- **Recovery:** a hop counted as received only once a later hop was heard, the start and the hops had no confirmation at all, and nothing retried automatically.
+- **Ties:** the scoreboard highlighted the first list item and numbered rows with a CSS counter, so equal scores looked ranked by array order.
+- **Updates:** the service worker took over as soon as it installed, and the page showed no version.
+
+Design decisions:
+- **Player ID per browser tab** in the ready message. The roster is keyed by ID, never by name. A protocol change was needed, so the format was versioned to v4 (`0xD4`), and an intact chirp from another version is reported, never misread.
+- **Confirmed delivery:** the next player's phone sends a short "got it" for each hop, and each phone confirms the start and the results in its own seat slot. Only the sender retries, with identical bytes, a bounded number of times, and only after every expected reply has had time to arrive. A phone holds its own chirps while others are due to answer.
+- **Competition ranking** (5, 5, 3 → 1, 1, 3) with an equal highlight and "Joint winners".
+- **Update prompt:** the new worker waits; the page shows "Update available · Reload to update" and never reloads by itself.
+
+Bugs caught during this work:
+- Unit test: the host's "got it" for the last hop was rejected, because acks from seat 1 were ignored.
+- Code review: an expired "confirmed" timestamp would have re-armed a 50 ms timer forever.
+
+The drawing controls were left unchanged; the browser checks confirm them.
+
+## Repository check against the Kiroween 2026 rules
+
+The agent read the official rules page and checked the repository: public, MIT license detected by GitHub, `/.kiro` at the root and not ignored, ggwave's license in `THIRD_PARTY_NOTICES.md`, first commit on Nov 19, 2026 (inside the Submission Period). Follow-ups: renamed the spec folder and steering file to `dial-up-telephone`, removed 11 screenshots of old screens, added the demo video link and macOS/Linux setup notes to the README.
+
 ## Verification (latest)
 
-- `npm.cmd run check`: typecheck, production build, and 107 automated tests in 10 files (`tests/`): packets v3, game rules with a simulated room of 2–8 devices (missing hops, targeted recovery, recovery after the reveal, duplicates, stale rounds, seat clashes, scoring, awards, Party Match totals, refresh), rotation and fairness, prompts, static twists, the drawing model, captions, offline build, and synthetic ggwave (58-byte packet and handshake schedule).
-- `npm.cmd run screens`: 15 checks in headless Edge at 390×844 and 1366×820: lobby, join, host setup, first drawer with word reroll and drawing tools (keyboard, mouse stroke, undo/redo, eraser, large brush, clear), bigger canvas, static notes, secrecy, waiting/sent, host missing hops, odd-count room guess, reveal, results, recovery from the reveal, Party Match final, no console errors. Screenshots are in `docs/screenshots/`. No sound travels in this check.
-- **Not done:** any real speaker-to-microphone run, phone browsers, offline reload on devices, or playtests.
+- `npm.cmd run check`: typecheck, production build, and 173 automated tests in 14 files (`tests/`): packets v4 (including other-version detection), game rules with a simulated room of 2–8 devices (missing hops, targeted recovery, recovery after the reveal, duplicates, stale rounds, seat clashes, same names on different seats, scoring, awards, Party Match totals, refresh), delivery confirmation (lost messages, bounded retries, duplicate delivery, repeated results), competition ranking, the update prompt rules, rotation and fairness, prompts, static twists, the drawing model, captions, offline build, and synthetic ggwave (58-byte packet, reply-slot lengths, handshake).
+- `npm.cmd run screens`: 25 checks in headless Edge at 390×844 and 1366×820, including tied scores and the version footer. Screenshots are in `docs/screenshots/`. No sound travels in this check.
+- The GitHub Pages workflow ran the same build and tests and published v0.2.0.
+- **Not done:** any real speaker-to-microphone run, phone browsers, offline reload on devices, or playtests. Results belong in `docs/hardware-log.md`.

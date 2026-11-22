@@ -1,8 +1,8 @@
 # Dial-Up Telephone: project rules
 
-(The file keeps its original name. The project was the "Ghost Frequency" ghost game until it was replaced by Dial-Up Telephone.)
+(The project was the "Ghost Frequency" ghost game until it was replaced by Dial-Up Telephone. This file and the spec folder were renamed from `ghost-frequency` to `dial-up-telephone`.)
 
-- Spec: #[[file:.kiro/specs/ghost-frequency/requirements.md]] and #[[file:.kiro/specs/ghost-frequency/design.md]].
+- Spec: #[[file:.kiro/specs/dial-up-telephone/requirements.md]] and #[[file:.kiro/specs/dial-up-telephone/design.md]].
 - Game data moves **only** speaker → microphone. Never add network, WebRTC, Bluetooth, QR, or shared-storage transfer paths.
 - Keep protocol, game state, and audio generation separate. `src/protocol`, `src/game`, `src/state`, and `src/audio/handshake.ts` stay pure (no DOM, no audio APIs) so they can be tested in Node.
 - Every behavior change gets a vitest test. Use fast-check properties for encode/decode, static, and dedupe rules.

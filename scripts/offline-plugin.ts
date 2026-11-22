@@ -20,7 +20,7 @@ function walk(dir: string): string[] {
 export function offlinePlugin(): Plugin {
   let outDir = 'dist';
   return {
-    name: 'ghost-frequency-offline',
+    name: 'dial-up-telephone-offline',
     apply: 'build',
     configResolved(config) {
       outDir = join(config.root, config.build.outDir);

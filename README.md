@@ -4,6 +4,8 @@ The classic **telephone** drawing game, played over a resurrected **1980s acoust
 
 **Play:** https://urvishapatel1511.github.io/Dial-Up-Telephone/ (the live site updates when changes are pushed to `main`)
 
+**Demo video:** https://youtu.be/CD7UmkzY2tg
+
 > This repository started as "Ghost Frequency" (renamed from `Ghost_frequency`), a two-player ghost puzzle. It was replaced by this party game. The ghost version is still in git history (commit `62f79bf`).
 
 ## What's new in 0.2.0 (sound protocol v4)
@@ -44,12 +46,18 @@ One chirp reaches every phone in the room at once. That broadcast is what lets e
 
 ## Develop
 
+Needs Node.js 22 (the version the GitHub Pages workflow uses).
+
 ```powershell
 npm.cmd install
 npm.cmd run check     # typecheck + production build + automated tests (synthetic waveform, no air path)
 npm.cmd run screens   # optional: renders game screens in Microsoft Edge, saves docs/screenshots/
 npm.cmd run dev:https # HTTPS on the LAN for phone microphone access
 ```
+
+- **macOS and Linux:** use `npm` instead of `npm.cmd` (`npm install`, `npm run check`, `npm run dev:https`). `npm.cmd` is only needed in Windows PowerShell.
+- `npm run screens` is an optional check. It expects Microsoft Edge at its default Windows path (`tests-browser/screens.test.ts`, `EDGE`). Change that path to run it elsewhere.
+- Phones need a secure page for the microphone: use the published site, or `dev:https` and accept the certificate warning.
 
 - Real-device test and group playtest checklist: [docs/hardware-test.md](docs/hardware-test.md). Results: [docs/hardware-log.md](docs/hardware-log.md).
 - Publishing: [docs/publish.md](docs/publish.md). How Kiro was used: [docs/kiro-log.md](docs/kiro-log.md).
@@ -67,4 +75,4 @@ npm.cmd run dev:https # HTTPS on the LAN for phone microphone access
 - `src/audio`: ggwave (vendored, MIT) turns bytes into sound and back. Also a live spectrum and switchable effects that never overlap a chirp.
 - `src/offline`: the service worker, the "Prepare for offline play" check, and the update prompt (a new version waits until the player taps Reload to update).
 
-Spec, design, and tasks: `.kiro/specs/ghost-frequency/`. Third-party licenses: `THIRD_PARTY_NOTICES.md`.
+Spec, design, and tasks: `.kiro/specs/dial-up-telephone/`. Steering: `.kiro/steering/dial-up-telephone.md`. Third-party licenses: `THIRD_PARTY_NOTICES.md`.
